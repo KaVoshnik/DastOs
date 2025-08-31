@@ -139,7 +139,7 @@ char scancode_to_char(char scancode) {
 // Главная функция ядра
 void kernel_main() {
     clear_screen();
-    print_string("MyOS v0.1 - Functional Shell");
+    print_string("DastOS v0.1 - Functional Shell");
     print_newline();
     print_string("Type 'help' for available commands");
     print_newline();

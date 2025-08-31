@@ -5,7 +5,7 @@
 
 show_menu() {
     echo "=================="
-    echo "  MyOS Builder"
+    echo "  DastOS Builder"
     echo "=================="
     echo "1. Собрать загрузчик (bootloader)"
     echo "2. Собрать ядро (kernel)"

@@ -25,6 +25,7 @@ start:
     or eax, 1
     mov cr0, eax
 
+    ; Правильно: jmp 0x08:0x10000
     jmp 0x08:protected_mode
 
 enable_a20:
@@ -93,8 +94,7 @@ protected_mode:
     mov ss, ax
     mov esp, 0x90000
 
-    ; Переход на ядро
-    jmp 0x10000
+    jmp 0x08:0x10000
 
 ; Заполнение до 510 байт
 times 510 - ($-$$) db 0
