@@ -77,10 +77,5 @@ gdt_descriptor:
     dw gdt_end - gdt_start - 1
     dd gdt_start
 
-error:
-    mov si, msg_error
-    call print_string
-    jmp $
-
 times 510-($-$$) db 0
 dw 0xAA55
