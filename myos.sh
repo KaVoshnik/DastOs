@@ -16,6 +16,7 @@ show_menu() {
 
 build_bootloader() {
     nasm -f bin bootloader.asm -o bootloader.bin || { echo "Ошибка сборки загрузчика"; exit 1; }
+    echo "Загрузчик успешно собран"
 }
 
 build_kernel() {
@@ -25,24 +26,20 @@ build_kernel() {
 
     ld -m elf_i386 -T link.ld start.o idt.o kernel.o -o kernel.elf || { echo "Ошибка компоновки"; exit 1; }
 
-    # Проверим символы
-    objdump -t kernel.elf | grep start
-
-    # Преобразуем в бинарник
-    objcopy -O binary -R .note -R .comment -R .note.gnu.build-id --strip-unneeded kernel.elf kernel.bin || { echo "Ошибка преобразования"; exit 1; }
-
-    # Проверим размер
+    # Проверка размера ядра
     size=$(stat -c%s kernel.bin)
     if [ $size -gt 7680 ]; then
         echo "Ошибка: kernel.bin слишком большой ($size байт). Увеличьте количество секторов в загрузчике."
         exit 1
     fi
+    echo "Ядро успешно собрано"
 }
 
 create_image() {
-    dd if=/dev/zero of=os.img bs=512 count=2880 || { echo "Ошибка создания образа"; exit 1; }
-    dd if=bootloader.bin of=os.img bs=512 count=1 conv=notrunc || { echo "Ошибка записи загрузчика"; exit 1; }
-    dd if=kernel.bin of=os.img bs=512 seek=1 conv=notrunc || { echo "Ошибка записи ядра"; exit 1; }
+    dd if=/dev/zero of=os.img bs=512 count=2880 status=none || { echo "Ошибка создания образа"; exit 1; }
+    dd if=bootloader.bin of=os.img bs=512 count=1 conv=notrunc status=none || { echo "Ошибка записи загрузчика"; exit 1; }
+    dd if=kernel.bin of=os.img bs=512 seek=1 conv=notrunc status=none || { echo "Ошибка записи ядра"; exit 1; }
+    echo "Образ диска создан"
 }
 
 run_qemu() {
@@ -58,6 +55,7 @@ full_build_run() {
 
 clean_project() {
     rm -f *.o *.bin os.img kernel.elf
+    echo "Проект очищен"
 }
 
 while true; do
