@@ -21,8 +21,8 @@ build_bootloader() {
 build_kernel() {
     nasm -f elf32 start.asm -o start.o || { echo "Ошибка сборки start.asm"; exit 1; }
     nasm -f elf32 idt.asm -o idt.o || { echo "Ошибка сборки idt.asm"; exit 1; }
-    gcc -ffreestanding -c kernel.c -o kernel.o || { echo "Ошибка сборки kernel.c"; exit 1; }
-    ld -T link.ld start.o idt.o kernel.o -o kernel.bin || { echo "Ошибка компоновки"; exit 1; }
+    gcc -m32 -ffreestanding -c kernel.c -o kernel.o || { echo "Ошибка сборки kernel.c"; exit 1; }
+    ld -m elf_i386 -T link.ld start.o idt.o kernel.o -o kernel.bin || { echo "Ошибка компоновки"; exit 1; }
 }
 
 create_image() {
@@ -58,4 +58,5 @@ while true; do
         6) clean_project ;;
         0) exit 0 ;;
         *) echo "Неверный выбор" ;;
-   
+    esac
+done

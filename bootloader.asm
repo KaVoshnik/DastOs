@@ -13,31 +13,31 @@ start:
     mov si, msg_loading
     call print_string
 
-    ; Загрузка ядра
-    mov ah, 0x02    ; Функция чтения секторов
-    mov al, 10      ; Количество секторов (должно быть достаточно для ядра)
+    mov ah, 0x02
+    mov al, 10      ; Количество секторов
     mov ch, 0       ; Цилиндр 0
-    mov cl, 2       ; Сектор 2 (после загрузочного)
+    mov cl, 2       ; Сектор 2
     mov dh, 0       ; Головка 0
     mov dl, [boot_drive]
     mov bx, 0x1000  ; Адрес загрузки ядра
     int 0x13
-    jc error        ; Переход на ошибку при сбое
+    jc error
 
-    ; Включение линии A20
+    ; Включение A20
     in al, 0x92
     or al, 2
     out 0x92, al
 
     ; Настройка GDT
+    cli             ; Отключение прерываний перед переходом
     lgdt [gdt_descriptor]
 
     ; Переход в защищённый режим
     mov eax, cr0
-    or eax, 1
+    or al, 1        ; Используем al вместо eax для 16-битного режима
     mov cr0, eax
 
-    jmp 0x08:protected_mode
+    jmp 0x08:0x1000 ; Переход в сегмент кода 0x08 на адрес 0x1000
 
 print_string:
     mov ah, 0x0E
@@ -79,13 +79,6 @@ gdt_end:
 gdt_descriptor:
     dw gdt_end - gdt_start - 1  ; Размер GDT
     dd gdt_start                ; Адрес GDT
-
-protected_mode:
-    mov ax, 0x10
-    mov ds, ax
-    mov es, ax
-    mov ss, ax
-    jmp 0x1000:0         ; Прыжок в защищённый режим на адрес 0x1000
 
 times 510-($-$$) db 0
 dw 0xAA55

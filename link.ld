@@ -1,17 +1,17 @@
 ENTRY(start)
 SECTIONS
 {
-    . = 0x1000;         /* Начальный адрес ядра */
+    . = 0x1000;
     .text : {
         *(.text)
         _etext = .;
-    } :text = 0x90      /* Права RX */
+    } :text = 0x90
     .data : {
         *(.data)
         _edata = .;
-    } :data = 0x90      /* Права RW */
+    } :data = 0x90
     .bss : {
         *(.bss)
         _end = .;
-    } :bss = 0x90       /* Права RW */
+    } :bss = 0x90
 }
