@@ -4,24 +4,25 @@ SECTIONS
 {
     . = 0x1000;
 
-    .text : ALIGN(4096) {
+    .text : {
         *(.text)
         *(.rodata)
         *(.init)
         *(.fini)
-    } > .text
+        *(.gnu.linkonce.t.*)
+    }
 
-    .data : ALIGN(4096) {
+    .data : {
         *(.data)
         *(.got)
         *(.got.plt)
-    } > .data
+    }
 
-    .bss : ALIGN(4096) {
+    .bss : {
         *(.bss)
         *(.sbss)
         *(COMMON)
-    } > .bss
+    }
 
     /* Символы */
     _etext = .;
