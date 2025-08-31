@@ -1,4 +1,3 @@
-; bootloader.asm
 BITS 16
 ORG 0x7C00
 
@@ -9,33 +8,27 @@ start:
     mov ss, ax
     mov sp, 0x7C00
 
-    ; Сохраняем номер загрузочного диска
     mov [boot_drive], dl
 
-    ; Сообщение о начале загрузки
     mov si, msg_loading
     call print_string
 
-    ; Загрузка ядра (упрощённый пример)
-    mov ah, 0x02    ; Функция BIOS: чтение секторов
+    mov ah, 0x02
     mov al, 10      ; Количество секторов
     mov ch, 0       ; Цилиндр 0
     mov cl, 2       ; Сектор 2
     mov dh, 0       ; Головка 0
     mov dl, [boot_drive]
-    mov bx, 0x10000 ; Адрес загрузки ядра
+    mov bx, 0x1000  ; Адрес загрузки ядра (изменил с 0x10000 на 0x1000 для 16-битного режима)
     int 0x13
-    jc error        ; Прыжок на ошибку при сбое
+    jc error
 
-    ; Включение A20 (упрощённый пример)
     in al, 0x92
     or al, 2
     out 0x92, al
 
-    ; Загрузка GDT
     lgdt [gdt_descriptor]
 
-    ; Переход в защищённый режим
     mov eax, cr0
     or eax, 1
     mov cr0, eax
@@ -64,23 +57,21 @@ msg_error: db "Failed to load kernel", 0
 boot_drive: db 0
 
 gdt_start:
-    dd 0, 0
-    dw 0xFFFF, 0
-    db 0, 0x9A, 0xCF, 0
-    dw 0xFFFF, 0
-    db 0, 0x92, 0xCF, 0
+    dd 0, 0             ; Нулевой дескриптор
+    dw 0xFFFF           ; Лимит сегмента кода (0xFFFF)
+    dw 0x0000           ; База (низкие 16 бит)
+    db 0x00             ; База (средний байт)
+    db 0x9A             ; Доступ (код, читаемый, исполняемый)
+    db 0xCF             ; Флаги (4 ГБ, 32-бит)
+    db 0x00             ; База (высокий байт)
+    dw 0xFFFF           ; Лимит сегмента данных (0xFFFF)
+    dw 0x0000           ; База (низкие 16 бит)
+    db 0x00             ; База (средний байт)
+    db 0x92             ; Доступ (данные, читаемые/записываемые)
+    db 0xCF             ; Флаги (4 ГБ, 32-бит)
+    db 0x00             ; База (высокий байт)
 gdt_end:
 
 gdt_descriptor:
-    dw gdt_end - gdt_start - 1
-    dd gdt_start
-
-protected_mode:
-    mov ax, 0x10
-    mov ds, ax
-    mov es, ax
-    mov ss, ax
-    jmp 0x10000
-
-times 510-($-$$) db 0
-dw 0xAA55
+    dw gdt_end - gdt_start - 1  ; Размер GDT (16 бит)
+    dd gdt_start                ; Адрес GDT (32 бита, но в 16-битном режиме

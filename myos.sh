@@ -15,20 +15,20 @@ show_menu() {
 }
 
 build_bootloader() {
-    nasm -f bin bootloader.asm -o bootloader.bin || { echo "Ошибка сборки загрузчика"; exit 1; }
+    nasm -f bin bootloader.asm -o bootloader.bin
 }
 
 build_kernel() {
-    nasm -f elf32 start.asm -o start.o || { echo "Ошибка сборки start.asm"; exit 1; }
-    nasm -f elf32 idt.asm -o idt.o || { echo "Ошибка сборки idt.asm"; exit 1; }
-    gcc -ffreestanding -c kernel.c -o kernel.o || { echo "Ошибка сборки kernel.c"; exit 1; }
-    ld -T link.ld start.o idt.o kernel.o -o kernel.bin || { echo "Ошибка компоновки"; exit 1; }
+    nasm -f elf32 start.asm -o start.o
+    nasm -f elf32 idt.asm -o idt.o
+    gcc -ffreestanding -c kernel.c -o kernel.o
+    ld -T link.ld start.o idt.o kernel.o -o kernel.bin
 }
 
 create_image() {
-    dd if=/dev/zero of=os.img bs=512 count=2880 || { echo "Ошибка создания образа"; exit 1; }
-    dd if=bootloader.bin of=os.img bs=512 count=1 conv=notrunc || { echo "Ошибка записи загрузчика"; exit 1; }
-    dd if=kernel.bin of=os.img bs=512 seek=1 conv=notrunc || { echo "Ошибка записи ядра"; exit 1; }
+    dd if=/dev/zero of=os.img bs=512 count=2880
+    dd if=bootloader.bin of=os.img bs=512 count=1 conv=notrunc
+    dd if=kernel.bin of=os.img bs=512 seek=1 conv=notrunc
 }
 
 run_qemu() {
