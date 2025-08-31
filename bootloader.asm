@@ -8,6 +8,9 @@ start:
     mov ss, ax
     mov sp, 0x7C00
 
+    ; Сохраняем номер загрузочного диска
+    mov [boot_drive], dl
+
     ; Сообщение о начале загрузки
     mov si, msg_loading
     call print_string
@@ -35,17 +38,11 @@ enable_a20:
     out 0x92, al
     ret
 
-; Загрузка ядра через INT 0x13
+; Загрузка ядра через LBA
 load_kernel:
-    mov ah, 0x02
-    mov al, 50       ; Загружаем 50 секторов
-    mov ch, 0        ; Цилиндр 0
-    mov cl, 2        ; Сектор 2
-    mov dh, 0        ; Головка 0
-    mov dl, 0x00     ; Диск A:
-    mov bx, 0x1000   ; ES:BX = 0x1000:0x0000
-    mov es, bx
-    xor bx, bx
+    mov si, DAP
+    mov ah, 0x42
+    mov dl, [boot_drive]
     int 0x13
     jc disk_error
     ret
@@ -69,6 +66,16 @@ print_string:
 ; Данные
 msg_loading db "Loading kernel...", 13, 10, 0
 msg_disk_error db "Disk error!", 13, 10, 0
+boot_drive db 0
+
+; DAP (Disk Address Packet)
+DAP:
+    db 0x10   ; размер DAP
+    db 0      ; reserved
+    dw 50     ; количество секторов
+    dw 0x0000 ; смещение
+    dw 0x1000 ; сегмент
+    dq 1      ; начальный LBA (сектор 1)
 
 ; GDT
 gdt_start:

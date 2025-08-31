@@ -37,7 +37,7 @@ build_kernel() {
     gcc -m32 -ffreestanding -nostdlib -c kernel.c -o kernel.o
     
     # Линковка
-    ld -m elf_i386 -T link.ld start.o kernel.o -o kernel.bin
+    ld -m elf_i386 -T link.ld start.o kernel.o -o kernel.bin -nostdlib
     
     if [ $? -eq 0 ]; then
         echo "✅ Ядро собрано успешно"
