@@ -167,6 +167,3 @@ help_text db 'Available commands:', 13, 10
           db '  clear - Clear screen', 13, 10, 0
 
 unknown_cmd_msg db 'Unknown command. Type "help" for available commands.', 13, 10, 0
-
-; Заполнение до конца сектора
-times 512 - ($ - $$) db 0
