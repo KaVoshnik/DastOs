@@ -1,5 +1,6 @@
-BITS 16         ; 16-битный режим
-ORG 0x7C00      ; Загрузочный сектор загружается по адресу 0x7C00
+BITS 16
+
+ORG 0x7C00
 
 start:
     ; Установим сегментные регистры
@@ -7,31 +8,89 @@ start:
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov sp, 0x7C00  ; Установим стек
+    mov sp, 0x7C00
 
-    ; Выведем сообщение
-    mov si, msg
-    call print_string
+    ; Включим A20 линию
+    in al, 0x92
+    or al, 2
+    out 0x92, al
 
-    ; Бесконечный цикл
-hang:
-    jmp hang
+    ; Загрузим GDT
+    lgdt [gdt_descriptor]
 
-; Функция вывода строки
-print_string:
-    lodsb           ; Загружаем байт из [SI] в AL
-    or al, al       ; Проверяем, не ноль ли
-    jz done         ; Если ноль — конец строки
-    mov ah, 0x0E    ; Функция BIOS: вывод символа
-    int 0x10        ; Вызов прерывания
-    jmp print_string
-done:
+    ; Переход в Protected Mode
+    mov eax, cr0
+    or eax, 1
+    mov cr0, eax
+
+    ; Длинный переход в 32-битный код
+    jmp 0x08:protected_mode
+
+; ========================
+; GDT
+; ========================
+gdt_start:
+    dq 0x0 ; NULL дескриптор
+
+gdt_code:
+    dw 0xFFFF    ; Лимит
+    dw 0x0000    ; База
+    db 0x00      ; База
+    db 10011010b ; Флаги доступа
+    db 11001111b ; Флаги + лимит
+    db 0x00      ; База
+
+gdt_data:
+    dw 0xFFFF
+    dw 0x0000
+    db 0x00
+    db 10010010b
+    db 11001111b
+    db 0x00
+
+gdt_end:
+
+gdt_descriptor:
+    dw gdt_end - gdt_start - 1
+    dd gdt_start
+
+; ========================
+; 32-битный режим
+; ========================
+BITS 32
+
+protected_mode:
+    ; Установим сегментные регистры
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov esp, 0x90000
+
+    ; Загрузим ядро с диска (сектор 2+)
+    call load_kernel
+
+    ; Передадим управление ядру
+    jmp 0x100000
+
+; ========================
+; Загрузка ядра
+; ========================
+load_kernel:
+    mov ah, 0x02    ; Чтение секторов
+    mov al, 10      ; Сколько секторов читать
+    mov ch, 0       ; Цилиндр
+    mov cl, 2       ; Сектор (начинаем с 2)
+    mov dh, 0       ; Головка
+    mov dl, 0x80    ; Диск (0x80 = первый жёсткий диск)
+    mov bx, 0x1000  ; Адрес загрузки (0x100000)
+    mov es, bx
+    mov bx, 0
+    int 0x13
     ret
 
-msg db 'Hello, OS World!', 0
-
-; Заполняем оставшееся место до 510 байт
+; Заполнение до 510 байт
 times 510 - ($ - $$) db 0
-
-; Сигнатура загрузочного сектора
 dw 0xAA55
