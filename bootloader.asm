@@ -25,8 +25,8 @@ start:
     or eax, 1
     mov cr0, eax
 
-    ; Правильно: long jump в сегмент 0x08 и смещение 0x10000
-    ljmp 0x08:0x10000
+    ; Правильно: far jump в сегмент 0x08 и смещение 0x10000
+    jmp 0x08:0x10000
 
 enable_a20:
     in al, 0x92
