@@ -1,4 +1,4 @@
-// Простые функции для работы с видеоадаптером
+// Функции для работы с видеоадаптером
 #define VIDEO_MEMORY 0xB8000
 
 void clear_screen() {
@@ -20,7 +20,7 @@ void print_string(const char *str) {
 // Главная функция ядра
 void kernel_main() {
     clear_screen();
-    print_string("MyOS v0.1 - C Kernel");
+    print_string("MyOS v0.1 - C Kernel Loaded Successfully!");
     
     // Бесконечный цикл
     while (1) {

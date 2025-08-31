@@ -34,10 +34,10 @@ build_kernel() {
     nasm -f elf32 start.asm -o start.o
     
     # Компиляция ядра на C
-    gcc -m32 -ffreestanding -c kernel.c -o kernel.o
+    gcc -m32 -ffreestanding -nostdlib -c kernel.c -o kernel.o
     
     # Линковка
-    ld -m elf_i386 -T link.ld start.o kernel.o -o kernel.bin -nostdlib
+    ld -m elf_i386 -T link.ld start.o kernel.o -o kernel.bin
     
     if [ $? -eq 0 ]; then
         echo "✅ Ядро собрано успешно"
@@ -49,9 +49,9 @@ build_kernel() {
 
 create_image() {
     echo "Создание образа диска..."
-    dd if=/dev/zero of=os.img count=3000 2>/dev/null
-    dd if=boot.bin of=os.img count=1 conv=notrunc 2>/dev/null
-    dd if=kernel.bin of=os.img seek=1 conv=notrunc 2>/dev/null
+    dd if=/dev/zero of=os.img bs=512 count=2880 2>/dev/null
+    dd if=boot.bin of=os.img bs=512 count=1 conv=notrunc 2>/dev/null
+    dd if=kernel.bin of=os.img bs=512 seek=1 conv=notrunc 2>/dev/null
     if [ $? -eq 0 ]; then
         echo "✅ Образ диска создан"
         ls -lh os.img
@@ -67,7 +67,7 @@ run_qemu() {
     fi
     echo "Запуск QEMU..."
     echo "Нажмите Ctrl+A, затем X для выхода"
-    qemu-system-x86_64 -fda os.img
+    qemu-system-x86_64 -drive format=raw,file=os.img -m 512M
 }
 
 full_build() {

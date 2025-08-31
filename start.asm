@@ -3,11 +3,17 @@ extern kernel_main
 
 global start
 start:
-    ; Установка стека
+    ; Инициализация сегментов данных
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
     mov esp, 0x90000
     
     ; Вызов основной функции ядра на C
     call kernel_main
     
-    ; Бесконечный цикл, если ядро вернется
+    ; Бесконечный цикл
+    cli
+    hlt
     jmp $
