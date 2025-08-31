@@ -8,8 +8,8 @@ start:
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov esp, 0x9000    ; Изменил с 0x90000 на 0x9000 для совместимости с 0x1000
-    
+    mov esp, 0x9000    ; Стек начинается выше адреса ядра
+
     call load_idt
     
     call kernel_main
