@@ -3,14 +3,28 @@ ENTRY(start)
 SECTIONS
 {
     . = 0x1000;
-    .text : {
+
+    .text : ALIGN(4096) {
         *(.text)
         *(.rodata)
-    }
-    .data : {
+        *(.init)
+        *(.fini)
+    } > .text
+
+    .data : ALIGN(4096) {
         *(.data)
-    }
-    .bss : {
+        *(.got)
+        *(.got.plt)
+    } > .data
+
+    .bss : ALIGN(4096) {
         *(.bss)
-    }
+        *(.sbss)
+        *(COMMON)
+    } > .bss
+
+    /* Символы */
+    _etext = .;
+    _edata = .;
+    _end = .;
 }

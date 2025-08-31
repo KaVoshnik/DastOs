@@ -23,8 +23,20 @@ build_kernel() {
     nasm -f elf32 idt.asm -o idt.o || { echo "Ошибка сборки idt.asm"; exit 1; }
     gcc -m32 -ffreestanding -fno-stack-protector -fno-builtin -fno-exceptions -c kernel.c -o kernel.o || { echo "Ошибка сборки kernel.c"; exit 1; }
 
-    ld -m elf_i386 -T link.ld start.o idt.o kernel.o -o kernel.elf || { echo "Ошибка компоновки"; exit 1; }
-    objcopy -O binary -R .note -R .comment -R .note.gnu.build-id kernel.elf kernel.bin || { echo "Ошибка преобразования"; exit 1; }
+    ld -m elf_i386 -T link.ld start.o idt.o kernel.o -o kernel.elf
+
+    # Проверим, что символ start существует
+    readelf -s kernel.elf | grep start
+
+    # Преобразуем в бинарник
+    objcopy -O binary -R .note -R .comment -R .note.gnu.build-id --strip-unneeded kernel.elf kernel.bin
+
+    # Проверим размер
+    size=$(stat -c%s kernel.bin)
+    if [ $size -gt 5120 ]; then
+        echo "Ошибка: kernel.bin слишком большой ($size байт). Увеличьте количество секторов в загрузчике."
+        exit 1
+    fi
 }
 
 create_image() {
