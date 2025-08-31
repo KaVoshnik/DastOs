@@ -67,6 +67,7 @@ run_qemu() {
     fi
     echo "Запуск QEMU..."
     echo "Нажмите Ctrl+A, затем X для выхода"
+    echo "Для ввода команд щелкните мышью в окне QEMU"
     qemu-system-x86_64 -drive format=raw,file=os.img -m 512M
 }
 

@@ -11,10 +11,6 @@ start:
     ; Сохраняем номер загрузочного диска
     mov [boot_drive], dl
 
-    ; Сообщение о начале загрузки
-    mov si, msg_loading
-    call print_string
-
     ; Загрузка ядра
     call load_kernel
 
@@ -23,9 +19,6 @@ start:
 
     ; Загрузка GDT
     lgdt [gdt_descriptor]
-
-    ; Загрузка IDT
-    lidt [idt_descriptor]
 
     ; Переход в защищённый режим
     mov eax, cr0
@@ -40,44 +33,29 @@ enable_a20:
     out 0x92, al
     ret
 
-; Загрузка ядра через LBA
+; Загрузка ядра через CHS (более надежно)
 load_kernel:
-    mov si, DAP
-    mov ah, 0x42
+    mov ah, 0x02
+    mov al, 50       ; Количество секторов
+    mov ch, 0        ; Цилиндр
+    mov cl, 2        ; Сектор
+    mov dh, 0        ; Головка
     mov dl, [boot_drive]
+    mov bx, 0x1000   ; ES:BX = 0x1000:0x0000
+    mov es, bx
+    xor bx, bx
     int 0x13
     jc disk_error
     ret
 
 disk_error:
-    mov si, msg_disk_error
-    call print_string
+    ; Простая обработка ошибки - просто останавливаемся
+    cli
     hlt
-
-print_string:
-    mov ah, 0x0E
-.loop:
-    lodsb
-    test al, al
-    jz .done
-    int 0x10
-    jmp .loop
-.done:
-    ret
+    jmp $
 
 ; Данные
-msg_loading db "Loading kernel...", 13, 10, 0
-msg_disk_error db "Disk error!", 13, 10, 0
 boot_drive db 0
-
-; DAP (Disk Address Packet)
-DAP:
-    db 0x10   ; размер DAP
-    db 0      ; reserved
-    dw 100    ; количество секторов (увеличено)
-    dw 0x0000 ; смещение
-    dw 0x1000 ; сегмент
-    dq 1      ; начальный LBA (сектор 1)
 
 ; GDT
 gdt_start:
@@ -105,15 +83,6 @@ gdt_descriptor:
     dw gdt_end - gdt_start - 1
     dd gdt_start
 
-; IDT (пустая, но необходима)
-idt_start:
-    times 256 dq 0
-idt_end:
-
-idt_descriptor:
-    dw idt_end - idt_start - 1
-    dd idt_start
-
 BITS 32
 protected_mode:
     mov ax, 0x10
@@ -127,5 +96,6 @@ protected_mode:
     ; Переход на ядро
     jmp 0x10000
 
+; Заполнение до 510 байт
 times 510 - ($-$$) db 0
 dw 0xAA55
