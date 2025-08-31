@@ -30,15 +30,18 @@ build_bootloader() {
 
 build_kernel() {
     echo "Сборка ядра..."
-    nasm -f elf32 kernel.asm -o kernel.o
+    # Компиляция ассемблерной заглушки
+    nasm -f elf32 start.asm -o start.o
+    
+    # Компиляция ядра на C
+    gcc -m32 -ffreestanding -c kernel.c -o kernel.o
+    
+    # Линковка
+    ld -m elf_i386 -T link.ld start.o kernel.o -o kernel.bin -nostdlib
+    
     if [ $? -eq 0 ]; then
-        ld -m elf_i386 -T link.ld kernel.o -o kernel.bin
-        if [ $? -eq 0 ]; then
-            echo "✅ Ядро собрано успешно"
-            ls -lh kernel.bin
-        else
-            echo "❌ Ошибка линковки ядра"
-        fi
+        echo "✅ Ядро собрано успешно"
+        ls -lh kernel.bin
     else
         echo "❌ Ошибка сборки ядра"
     fi

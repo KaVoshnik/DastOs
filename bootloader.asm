@@ -55,7 +55,7 @@ gdt_descriptor:
 ; Загрузка ядра через INT 0x13
 load_kernel:
     mov ah, 0x02
-    mov al, 1       ; Загружаем только 1 сектор
+    mov al, 10       ; Загружаем 10 секторов
     mov ch, 0
     mov cl, 2
     mov dh, 0
@@ -93,11 +93,7 @@ protected_mode:
     mov ss, ax
     mov esp, 0x90000
 
-    ; Выведем символ 'B'
-    mov byte [0xB8000], 'B'
-    mov byte [0xB8001], 0x0A
-
-    ; Переход на ядро (теперь по адресу 0x10000)
+    ; Переход на ядро
     jmp 0x10000
 
 times 510 - ($-$$) db 0
