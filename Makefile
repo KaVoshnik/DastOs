@@ -4,7 +4,7 @@ CC = gcc
 AS = nasm
 LD = ld
 
-CFLAGS = -m32 -nostdlib -nostdinc -fno-builtin -ffreestanding -Wall -Wextra
+CFLAGS = -m32 -nostdlib -nostdinc -fno-builtin -ffreestanding -Wall -Wextra -I. -c
 ASFLAGS = -f elf32
 LDFLAGS = -m elf_i386 -T linker.ld
 
@@ -16,7 +16,7 @@ bootloader.o: bootloader.asm
 	$(AS) $(ASFLAGS) $< -o $@
 
 kernel.o: kernel.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $< -o $@
 
 dastos.bin: $(OBJ)
 	$(LD) $(LDFLAGS) -o $@ $^

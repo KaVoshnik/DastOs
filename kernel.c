@@ -58,8 +58,6 @@ void print(const char* str) {
 void shell() {
     print("DastOS Shell > ");
     // Простая команда: "help"
-    char input[32];
-    int i = 0;
 
     // Эмуляция ввода команды (в данном случае просто жестко заданная команда)
     const char* cmd = "help";
