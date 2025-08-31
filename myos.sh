@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# MyOS Builder & Runner
+# Меню для сборки и запуска операционной системы
+
 show_menu() {
     echo "=================="
     echo "  MyOS Builder"
@@ -15,63 +18,108 @@ show_menu() {
 }
 
 build_bootloader() {
-    nasm -f bin bootloader.asm -o bootloader.bin || { echo "Ошибка сборки загрузчика"; exit 1; }
-    echo "Загрузчик успешно собран"
+    echo "Сборка загрузчика..."
+    nasm -f bin bootloader.asm -o boot.bin
+    if [ $? -eq 0 ]; then
+        echo "✅ Загрузчик собран успешно"
+        ls -lh boot.bin
+    else
+        echo "❌ Ошибка сборки загрузчика"
+    fi
 }
 
 build_kernel() {
-    nasm -f elf32 start.asm -o start.o || { echo "Ошибка сборки start.asm"; exit 1; }
-    nasm -f elf32 idt.asm -o idt.o || { echo "Ошибка сборки idt.asm"; exit 1; }
-    gcc -m32 -ffreestanding -fno-stack-protector -fno-builtin -fno-exceptions -c kernel.c -o kernel.o || { echo "Ошибка сборки kernel.c"; exit 1; }
-
-    ld -m elf_i386 -z noexecstack --no-warn-execstack -T link.ld start.o idt.o kernel.o -o kernel.elf || { echo "Ошибка компоновки"; exit 1; }
-
-    # Преобразуем ELF в бинарный формат
-    objcopy -O binary kernel.elf kernel.bin || { echo "Ошибка преобразования"; exit 1; }
-
-    # Проверим размер
-    size=$(stat -c%s kernel.bin)
-    if [ $size -gt 7680 ]; then
-        echo "Ошибка: kernel.bin слишком большой ($size байт). Увеличьте количество секторов в загрузчике."
-        exit 1
+    echo "Сборка ядра..."
+    # Компиляция ассемблерной заглушки
+    nasm -f elf32 start.asm -o start.o
+    
+    # Компиляция ядра на C
+    gcc -m32 -ffreestanding -nostdlib -c kernel.c -o kernel.o
+    
+    # Линковка
+    ld -m elf_i386 -T link.ld start.o kernel.o -o kernel.bin -nostdlib
+    
+    if [ $? -eq 0 ]; then
+        echo "✅ Ядро собрано успешно"
+        ls -lh kernel.bin
+    else
+        echo "❌ Ошибка сборки ядра"
     fi
-    echo "Ядро успешно собрано"
 }
 
 create_image() {
-    dd if=/dev/zero of=os.img bs=512 count=2880 status=none || { echo "Ошибка создания образа"; exit 1; }
-    dd if=bootloader.bin of=os.img bs=512 count=1 conv=notrunc status=none || { echo "Ошибка записи загрузчика"; exit 1; }
-    dd if=kernel.bin of=os.img bs=512 seek=1 conv=notrunc status=none || { echo "Ошибка записи ядра"; exit 1; }
-    echo "Образ диска создан"
+    echo "Создание образа диска..."
+    dd if=/dev/zero of=os.img bs=512 count=2880 2>/dev/null
+    dd if=boot.bin of=os.img bs=512 count=1 conv=notrunc 2>/dev/null
+    dd if=kernel.bin of=os.img bs=512 seek=1 conv=notrunc 2>/dev/null
+    if [ $? -eq 0 ]; then
+        echo "✅ Образ диска создан"
+        ls -lh os.img
+    else
+        echo "❌ Ошибка создания образа"
+    fi
 }
 
 run_qemu() {
-    qemu-system-x86_64 -fda os.img -serial stdio
+    if [ ! -f os.img ]; then
+        echo "❌ Образ os.img не найден. Сначала создайте его."
+        return
+    fi
+    echo "Запуск QEMU..."
+    echo "Нажмите Ctrl+A, затем X для выхода"
+    qemu-system-x86_64 -drive format=raw,file=os.img -m 512M
 }
 
-full_build_run() {
+full_build() {
+    echo "Полная сборка..."
     build_bootloader
     build_kernel
     create_image
-    run_qemu
+    echo "✅ Полная сборка завершена"
 }
 
 clean_project() {
-    rm -f *.o *.bin os.img kernel.elf
-    echo "Проект очищен"
+    echo "Очистка проекта..."
+    rm -f *.o *.img *.bin
+    echo "✅ Проект очищен"
 }
 
+# Основной цикл
 while true; do
     show_menu
-    read -p "Выберите опцию: " choice
+    read -p "Выберите действие (0-6): " choice
+    echo
+    
     case $choice in
-        1) build_bootloader ;;
-        2) build_kernel ;;
-        3) create_image ;;
-        4) run_qemu ;;
-        5) full_build_run ;;
-        6) clean_project ;;
-        0) exit 0 ;;
-        *) echo "Неверный выбор" ;;
+        1)
+            build_bootloader
+            ;;
+        2)
+            build_kernel
+            ;;
+        3)
+            create_image
+            ;;
+        4)
+            run_qemu
+            ;;
+        5)
+            full_build
+            run_qemu
+            ;;
+        6)
+            clean_project
+            ;;
+        0)
+            echo "До свидания!"
+            exit 0
+            ;;
+        *)
+            echo "Неверный выбор. Попробуйте снова."
+            ;;
     esac
+    
+    echo
+    read -p "Нажмите Enter для продолжения..."
+    clear
 done

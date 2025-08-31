@@ -8,74 +8,113 @@ start:
     mov ss, ax
     mov sp, 0x7C00
 
+    ; Сохраняем номер загрузочного диска
     mov [boot_drive], dl
 
+    ; Сообщение о начале загрузки
     mov si, msg_loading
     call print_string
 
-    mov ah, 0x02
-    mov al, 15      ; Читаем 10 секторов (должно быть достаточно для ядра)
-    mov ch, 0       ; Цилиндр 0
-    mov cl, 2       ; Сектор 2
-    mov dh, 0       ; Головка 0
-    mov dl, [boot_drive]
-    mov bx, 0x1000  ; Адрес загрузки ядра
-    int 0x13
-    jc error
+    ; Загрузка ядра
+    call load_kernel
 
+    ; Включение A20
+    call enable_a20
+
+    ; Загрузка GDT
+    lgdt [gdt_descriptor]
+
+    ; Переход в защищённый режим
+    mov eax, cr0
+    or eax, 1
+    mov cr0, eax
+
+    jmp 0x08:protected_mode
+
+; Включение линии A20
+enable_a20:
     in al, 0x92
     or al, 2
     out 0x92, al
+    ret
 
-    cli
-    lgdt [gdt_descriptor]
+; Загрузка ядра через LBA
+load_kernel:
+    mov si, DAP
+    mov ah, 0x42
+    mov dl, [boot_drive]
+    int 0x13
+    jc disk_error
+    ret
 
-    mov eax, cr0
-    or al, 1
-    mov cr0, eax
-
-    jmp 0x08:0x1000
+disk_error:
+    mov si, msg_disk_error
+    call print_string
+    hlt
 
 print_string:
     mov ah, 0x0E
-    mov bx, 0x0007
-.print_loop:
+.loop:
     lodsb
-    cmp al, 0
-    je .done
+    test al, al
+    jz .done
     int 0x10
-    jmp .print_loop
+    jmp .loop
 .done:
     ret
 
-error:
-    mov si, msg_error
-    call print_string
-    jmp $
+; Данные
+msg_loading db "Loading kernel...", 13, 10, 0
+msg_disk_error db "Disk error!", 13, 10, 0
+boot_drive db 0
 
-msg_loading: db "Loading MyOS...", 0
-msg_error: db "Failed to load kernel", 0
-boot_drive: db 0
+; DAP (Disk Address Packet)
+DAP:
+    db 0x10   ; размер DAP
+    db 0      ; reserved
+    dw 50     ; количество секторов
+    dw 0x0000 ; смещение
+    dw 0x1000 ; сегмент
+    dq 1      ; начальный LBA (сектор 1)
 
+; GDT
 gdt_start:
-    dd 0, 0
+    dq 0x0
+
+gdt_code:
     dw 0xFFFF
-    dw 0
-    db 0
-    db 0x9A
-    db 0xCF
-    db 0
+    dw 0x0000
+    db 0x00
+    db 10011010b
+    db 11001111b
+    db 0x00
+
+gdt_data:
     dw 0xFFFF
-    dw 0
-    db 0
-    db 0x92
-    db 0xCF
-    db 0
+    dw 0x0000
+    db 0x00
+    db 10010010b
+    db 11001111b
+    db 0x00
+
 gdt_end:
 
 gdt_descriptor:
     dw gdt_end - gdt_start - 1
     dd gdt_start
 
-times 510-($-$$) db 0
+BITS 32
+protected_mode:
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov esp, 0x90000
+
+    ; Переход на ядро
+    jmp 0x10000
+
+times 510 - ($-$$) db 0
 dw 0xAA55
