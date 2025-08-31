@@ -1,32 +1,22 @@
-# Makefile
+# Makefile for DastOs
 
-CC = gcc
-AS = nasm
-LD = ld
-OBJCOPY = objcopy
+all: dastos.img
 
-CFLAGS = -m32 -nostdlib -nostdinc -fno-builtin -ffreestanding -Wall -Wextra -I. -c
-ASFLAGS = -f elf32
-LDFLAGS = -m elf_i386 -T linker.ld
+boot.bin: boot.asm
+    nasm -f bin boot.asm -o boot.bin
 
-OBJ = bootloader.o kernel.o
-
-all: dastos.bin
-
-bootloader.o: bootloader.asm
-	$(AS) $(ASFLAGS) $< -o $@
+kernel.bin: kernel.o
+    ld -m elf_i386 -Ttext 0x7E00 --oformat binary kernel.o -o kernel.bin
 
 kernel.o: kernel.c
-	$(CC) $(CFLAGS) $< -o $@
+    gcc -ffreestanding -m32 -c kernel.c -o kernel.o
 
-dastos.bin: $(OBJ)
-	$(LD) $(LDFLAGS) -o dastos.elf $^
-	$(OBJCOPY) -O binary dastos.elf dastos.bin
-
-run: dastos.bin
-	qemu-system-i386 -kernel dastos.bin
+dastos.img: boot.bin kernel.bin
+    dd if=/dev/zero of=dastos.img bs=512 count=2880  # Floppy size
+    dd if=boot.bin of=dastos.img bs=512 conv=notrunc
+    dd if=kernel.bin of=dastos.img bs=512 seek=1 conv=notrunc
 
 clean:
-	rm -f *.o dastos.elf dastos.bin
+    rm -f *.bin *.o dastos.img
 
-.PHONY: all run clean
+.PHONY: all clean
