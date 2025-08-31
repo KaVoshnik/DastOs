@@ -101,7 +101,10 @@ void process_command(char *input) {
         print_newline();
         print_string("Rebooting...");
         // Команда перезагрузки через клавиатурный контроллер
+        asm volatile ("cli");
         asm volatile ("outb %0, $0x64" : : "a"((char)0xFE));
+        // Останавливаем выполнение после перезагрузки
+        for(;;);
     } else if (input[0] != 0) {
         print_newline();
         print_string("Unknown command: ");
