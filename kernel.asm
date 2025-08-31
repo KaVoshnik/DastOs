@@ -1,6 +1,7 @@
+; kernel.asm
 BITS 32
 
-ORG 0x100000
+global start
 
 start:
     ; Очистим экран
@@ -28,7 +29,6 @@ main_loop:
 ; Функции
 ; ========================
 
-; Очистка экрана (просто вывод пробелов)
 clear_screen:
     mov eax, 0xB8000
     mov ecx, 80*25*2
@@ -38,12 +38,10 @@ clear_screen:
     rep stosb
     ret
 
-; Вывод строки
 print_string:
     pusha
-    mov ebx, 0xB8000    ; VGA текстовый буфер
-    mov ecx, 0          ; Позиция курсора
-
+    mov ebx, 0xB8000
+    mov ecx, 0
 print_loop:
     lodsb
     cmp al, 0
@@ -56,32 +54,22 @@ print_done:
     popa
     ret
 
-; Чтение строки с клавиатуры
 read_string:
     pusha
     mov ecx, 0
 
 read_loop:
-    ; Ждём нажатия клавиши
     mov ah, 0
     int 0x16
-
-    ; Enter?
     cmp al, 13
     je read_enter
-
-    ; Backspace?
     cmp al, 8
     je read_backspace
 
-    ; Сохраняем символ
     stosb
     inc ecx
-
-    ; Покажем символ на экране
     mov ah, 0x0E
     int 0x10
-
     jmp read_loop
 
 read_backspace:
@@ -99,7 +87,7 @@ read_backspace:
     jmp read_loop
 
 read_enter:
-    mov byte [edi], 0   ; Null-terminate
+    mov byte [edi], 0
     mov ah, 0x0E
     mov al, 13
     int 0x10
@@ -108,24 +96,22 @@ read_enter:
     popa
     ret
 
-; Парсер команд
 parse_command:
     pusha
     mov esi, input_buffer
 
-    ; Сравним с "help"
+    ; help
     mov edi, help_cmd
     call strcmp
     test eax, eax
     jz cmd_help
 
-    ; Сравним с "clear"
+    ; clear
     mov edi, clear_cmd
     call strcmp
     test eax, eax
     jz cmd_clear
 
-    ; Неизвестная команда
     mov esi, unknown_cmd_msg
     call print_string
     popa
@@ -142,7 +128,6 @@ cmd_clear:
     popa
     ret
 
-; Простое сравнение строк
 strcmp:
     push esi
     push edi
