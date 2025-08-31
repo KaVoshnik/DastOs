@@ -84,10 +84,10 @@ load_kernel:
     mov ch, 0       ; Цилиндр
     mov cl, 2       ; Сектор (начинаем с 2)
     mov dh, 0       ; Головка
-    mov dl, 0x00    ; Флоппи-диск
-    mov bx, 0x1000  ; Адрес загрузки (0x100000)
+    mov dl, 0x00    ; Флоппи диск
+    mov bx, 0x0000  ; Адрес загрузки (0x100000)
     mov es, bx
-    mov bx, 0
+    mov bx, 0x0000
     int 0x13
     ret
 
