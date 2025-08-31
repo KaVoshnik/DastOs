@@ -24,6 +24,9 @@ start:
     ; Загрузка GDT
     lgdt [gdt_descriptor]
 
+    ; Загрузка IDT
+    lidt [idt_descriptor]
+
     ; Переход в защищённый режим
     mov eax, cr0
     or eax, 1
@@ -31,7 +34,6 @@ start:
 
     jmp 0x08:protected_mode
 
-; Включение линии A20
 enable_a20:
     in al, 0x92
     or al, 2
@@ -72,7 +74,7 @@ boot_drive db 0
 DAP:
     db 0x10   ; размер DAP
     db 0      ; reserved
-    dw 50     ; количество секторов
+    dw 100    ; количество секторов (увеличено)
     dw 0x0000 ; смещение
     dw 0x1000 ; сегмент
     dq 1      ; начальный LBA (сектор 1)
@@ -102,6 +104,15 @@ gdt_end:
 gdt_descriptor:
     dw gdt_end - gdt_start - 1
     dd gdt_start
+
+; IDT (пустая, но необходима)
+idt_start:
+    times 256 dq 0
+idt_end:
+
+idt_descriptor:
+    dw idt_end - idt_start - 1
+    dd idt_start
 
 BITS 32
 protected_mode:
