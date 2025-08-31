@@ -24,9 +24,12 @@ build_kernel() {
     nasm -f elf32 idt.asm -o idt.o || { echo "Ошибка сборки idt.asm"; exit 1; }
     gcc -m32 -ffreestanding -fno-stack-protector -fno-builtin -fno-exceptions -c kernel.c -o kernel.o || { echo "Ошибка сборки kernel.c"; exit 1; }
 
-    ld -m elf_i386 -T link.ld start.o idt.o kernel.o -o kernel.elf || { echo "Ошибка компоновки"; exit 1; }
+    ld -m elf_i386 -z noexecstack --no-warn-execstack -T link.ld start.o idt.o kernel.o -o kernel.elf || { echo "Ошибка компоновки"; exit 1; }
 
-    # Проверка размера ядра
+    # Преобразуем ELF в бинарный формат
+    objcopy -O binary kernel.elf kernel.bin || { echo "Ошибка преобразования"; exit 1; }
+
+    # Проверим размер
     size=$(stat -c%s kernel.bin)
     if [ $size -gt 7680 ]; then
         echo "Ошибка: kernel.bin слишком большой ($size байт). Увеличьте количество секторов в загрузчике."
