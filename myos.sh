@@ -1,5 +1,4 @@
 #!/bin/bash
-#MyOs Shell script
 
 show_menu() {
     echo "=================="
@@ -22,8 +21,10 @@ build_bootloader() {
 build_kernel() {
     nasm -f elf32 start.asm -o start.o || { echo "Ошибка сборки start.asm"; exit 1; }
     nasm -f elf32 idt.asm -o idt.o || { echo "Ошибка сборки idt.asm"; exit 1; }
-    gcc -m32 -ffreestanding -c kernel.c -o kernel.o || { echo "Ошибка сборки kernel.c"; exit 1; }
-    ld -m elf_i386 -T link.ld start.o idt.o kernel.o -o kernel.bin || { echo "Ошибка компоновки"; exit 1; }
+    gcc -m32 -ffreestanding -fno-stack-protector -fno-builtin -fno-exceptions -c kernel.c -o kernel.o || { echo "Ошибка сборки kernel.c"; exit 1; }
+
+    ld -m elf_i386 -T link.ld start.o idt.o kernel.o -o kernel.elf || { echo "Ошибка компоновки"; exit 1; }
+    objcopy -O binary -R .note -R .comment -R .note.gnu.build-id kernel.elf kernel.bin || { echo "Ошибка преобразования"; exit 1; }
 }
 
 create_image() {
@@ -33,7 +34,7 @@ create_image() {
 }
 
 run_qemu() {
-    qemu-system-x86_64 -fda os.img
+    qemu-system-x86_64 -fda os.img -serial stdio
 }
 
 full_build_run() {
@@ -44,7 +45,7 @@ full_build_run() {
 }
 
 clean_project() {
-    rm -f *.o *.bin os.img
+    rm -f *.o *.bin os.img kernel.elf
 }
 
 while true; do

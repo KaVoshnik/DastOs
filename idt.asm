@@ -25,6 +25,8 @@ idt_descriptor:
     dd idt_start
 
 section .text
+global keyboard_isr
+
 keyboard_isr:
     pushad
     call keyboard_handler
