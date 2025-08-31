@@ -46,8 +46,8 @@ build_kernel() {
 
 create_image() {
     echo "Создание образа диска..."
-    dd if=/dev/zero of=os.img bs=512 count=3000 2>/dev/null
-    dd if=boot.bin of=os.img bs=512 count=1 conv=notrunc 2>/dev/null
+    dd if=/dev/zero of=os.img count=3000 2>/dev/null
+    dd if=boot.bin of=os.img count=1 conv=notrunc 2>/dev/null
     dd if=kernel.bin of=os.img seek=2 conv=notrunc 2>/dev/null
     if [ $? -eq 0 ]; then
         echo "✅ Образ диска создан"
