@@ -14,7 +14,7 @@ start:
     call print_string
 
     mov ah, 0x02
-    mov al, 10      ; Количество секторов
+    mov al, 10      ; Читаем 10 секторов (должно быть достаточно для ядра)
     mov ch, 0       ; Цилиндр 0
     mov cl, 2       ; Сектор 2
     mov dh, 0       ; Головка 0
@@ -23,21 +23,18 @@ start:
     int 0x13
     jc error
 
-    ; Включение A20
     in al, 0x92
     or al, 2
     out 0x92, al
 
-    ; Настройка GDT
-    cli             ; Отключение прерываний перед переходом
+    cli
     lgdt [gdt_descriptor]
 
-    ; Переход в защищённый режим
     mov eax, cr0
-    or al, 1        ; Используем al вместо eax для 16-битного режима
+    or al, 1
     mov cr0, eax
 
-    jmp 0x08:0x1000 ; Переход в сегмент кода 0x08 на адрес 0x1000
+    jmp 0x08:0x1000
 
 print_string:
     mov ah, 0x0E
@@ -61,24 +58,24 @@ msg_error: db "Failed to load kernel", 0
 boot_drive: db 0
 
 gdt_start:
-    dd 0, 0             ; Нулевой дескриптор
-    dw 0xFFFF           ; Лимит сегмента кода
-    dw 0                ; База (низкие 16 бит)
-    db 0                ; База (средний байт)
-    db 0x9A             ; Доступ (код, читаемый)
-    db 0xCF             ; Флаги (4 ГБ, 32-бит)
-    db 0                ; База (высокий байт)
-    dw 0xFFFF           ; Лимит сегмента данных
-    dw 0                ; База (низкие 16 бит)
-    db 0                ; База (средний байт)
-    db 0x92             ; Доступ (данные, записываемые)
-    db 0xCF             ; Флаги (4 ГБ, 32-бит)
-    db 0                ; База (высокий байт)
+    dd 0, 0
+    dw 0xFFFF
+    dw 0
+    db 0
+    db 0x9A
+    db 0xCF
+    db 0
+    dw 0xFFFF
+    dw 0
+    db 0
+    db 0x92
+    db 0xCF
+    db 0
 gdt_end:
 
 gdt_descriptor:
-    dw gdt_end - gdt_start - 1  ; Размер GDT
-    dd gdt_start                ; Адрес GDT
+    dw gdt_end - gdt_start - 1
+    dd gdt_start
 
 times 510-($-$$) db 0
 dw 0xAA55

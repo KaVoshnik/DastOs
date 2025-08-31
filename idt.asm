@@ -1,4 +1,3 @@
-; idt.asm
 BITS 32
 
 extern keyboard_handler

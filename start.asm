@@ -8,7 +8,7 @@ start:
     mov ds, ax
     mov es, ax
     mov ss, ax
-    mov esp, 0x9000    ; Стек начинается выше адреса ядра
+    mov esp, 0x9000    ; Стек выше адреса ядра
 
     call load_idt
     
