@@ -22,8 +22,9 @@ void kernel_main() {
     clear_screen();
     print_string("MyOS v0.1 - C Kernel Loaded Successfully!");
     
-    // Бесконечный цикл
+    // Бесконечный цикл с запретом прерываний
+    asm volatile ("cli");
     while (1) {
-        // Здесь может быть код планировщика и обработки прерываний
+        asm volatile ("hlt");
     }
 }
