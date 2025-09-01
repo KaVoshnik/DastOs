@@ -8,6 +8,7 @@ SECTIONS
 
     /* Kernel code starts at 1MB */
     . = 1M;
+    
     .text : { *(.text) }
     .data : { *(.data) }
     .bss : { *(.bss) }
