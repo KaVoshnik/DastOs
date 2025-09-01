@@ -1,7 +1,7 @@
-ENTRY(start)
+ENTRY(_start)
 SECTIONS
 {
-    . = 0x10000;
+    . = 1M;
     .text : { *(.text) }
     .data : { *(.data) }
     .bss : { *(.bss) }
