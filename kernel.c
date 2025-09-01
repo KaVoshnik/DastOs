@@ -1,30 +1,16 @@
-// Функции для работы с видеоадаптером
-#define VIDEO_MEMORY 0xB8000
-
-void clear_screen() {
-    char *video_memory = (char*)VIDEO_MEMORY;
-    for (int i = 0; i < 80 * 25 * 2; i += 2) {
-        video_memory[i] = ' ';
-        video_memory[i + 1] = 0x07;
-    }
+// kernel.c
+void terminal_putchar(char c) {
+    char* video = (char*)0xB8000;
+    static int pos = 0;
+    video[pos++] = c;
+    video[pos++] = 0x07;
 }
 
-void print_string(const char *str) {
-    char *video_memory = (char*)VIDEO_MEMORY;
-    while (*str) {
-        *video_memory++ = *str++;
-        *video_memory++ = 0x07;
-    }
+void terminal_writestring(const char* data) {
+    for (int i = 0; data[i] != '\0'; i++)
+        terminal_putchar(data[i]);
 }
 
-// Главная функция ядра
 void kernel_main() {
-    clear_screen();
-    print_string("MyOS v0.1 - C Kernel Loaded Successfully!");
-    
-    // Бесконечный цикл с запретом прерываний
-    asm volatile ("cli");
-    while (1) {
-        asm volatile ("hlt");
-    }
+    terminal_writestring("Welcome to MyOS!\n");
 }

@@ -1,125 +1,99 @@
 #!/bin/bash
 
-# MyOS Builder & Runner
-# Меню для сборки и запуска операционной системы
+# Имя выходного файла
+OUTPUT="myos"
+ISO_NAME="myos.iso"
+KERNEL="myos.bin"
 
-show_menu() {
-    echo "=================="
-    echo "  MyOS Builder"
-    echo "=================="
-    echo "1. Собрать загрузчик (bootloader)"
-    echo "2. Собрать ядро (kernel)"
-    echo "3. Создать образ диска (os.img)"
-    echo "4. Запустить в QEMU"
-    echo "5. Полная сборка и запуск"
-    echo "6. Очистить проект"
-    echo "0. Выход"
-    echo "=================="
+# Цвета для красивого вывода
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+echo -e "${YELLOW}=== Сборка моей ОС ===${NC}"
+
+# Проверка наличия исходных файлов
+if [ ! -f "boot.asm" ]; then
+    echo -e "${RED}Ошибка: Файл boot.asm не найден!${NC}"
+    exit 1
+fi
+
+if [ ! -f "kernel.c" ]; then
+    echo -e "${RED}Ошибка: Файл kernel.c не найден!${NC}"
+    exit 1
+fi
+
+if [ ! -f "linker.ld" ]; then
+    echo -e "${RED}Ошибка: Файл linker.ld не найден!${NC}"
+    exit 1
+fi
+
+echo -e "${YELLOW}Шаг 1/5: Компиляция boot.asm...${NC}"
+if ! nasm -f elf32 boot.asm -o boot.o; then
+    echo -e "${RED}Ошибка при компиляции boot.asm${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✓ Успешно скомпилирован boot.asm${NC}"
+
+echo -e "${YELLOW}Шаг 2/5: Компиляция kernel.c...${NC}"
+if ! gcc -m32 -c kernel.c -o kernel.o -ffreestanding -fno-stack-protector -nostdlib; then
+    echo -e "${RED}Ошибка при компиляции kernel.c${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✓ Успешно скомпилирован kernel.c${NC}"
+
+echo -e "${YELLOW}Шаг 3/5: Линковка объектных файлов...${NC}"
+if ! ld -m elf_i386 -T linker.ld boot.o kernel.o -o $KERNEL; then
+    echo -e "${RED}Ошибка при линковке${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✓ Успешно собран $KERNEL${NC}"
+
+echo -e "${YELLOW}Шаг 4/5: Создание ISO-образа...${NC}"
+# Создаем временную структуру для ISO
+mkdir -p iso/boot/grub
+
+# Копируем ядро
+cp $KERNEL iso/boot/
+
+# Создаем конфиг GRUB
+cat > iso/boot/grub/grub.cfg << EOF
+menuentry "MyOS" {
+    multiboot /boot/$KERNEL
+    boot
 }
+EOF
 
-build_bootloader() {
-    echo "Сборка загрузчика..."
-    nasm -f bin bootloader.asm -o boot.bin
-    if [ $? -eq 0 ]; then
-        echo "✅ Загрузчик собран успешно"
-        ls -lh boot.bin
+# Создаем ISO-образ
+if ! grub-mkrescue -o $ISO_NAME iso 2>/dev/null; then
+    # Если grub-mkrescue не найден, пробуем xorriso
+    if command -v xorriso &> /dev/null; then
+        xorriso -as mkisofs -o $ISO_NAME -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table iso/ 2>/dev/null
     else
-        echo "❌ Ошибка сборки загрузчика"
+        echo -e "${RED}Не найдены инструменты для создания ISO (grub-mkrescue или xorriso)${NC}"
+        rm -rf iso
+        exit 1
     fi
-}
+fi
 
-build_kernel() {
-    echo "Сборка ядра..."
-    # Компиляция ассемблерной заглушки
-    nasm -f elf32 start.asm -o start.o
-    
-    # Компиляция ядра на C
-    gcc -m32 -ffreestanding -nostdlib -c kernel.c -o kernel.o
-    
-    # Линковка
-    ld -m elf_i386 -T link.ld start.o kernel.o -o kernel.bin -nostdlib
-    
-    if [ $? -eq 0 ]; then
-        echo "✅ Ядро собрано успешно"
-        ls -lh kernel.bin
-    else
-        echo "❌ Ошибка сборки ядра"
-    fi
-}
+echo -e "${GREEN}✓ Успешно создан $ISO_NAME${NC}"
 
-create_image() {
-    echo "Создание образа диска..."
-    dd if=/dev/zero of=os.img bs=512 count=2880 2>/dev/null
-    dd if=boot.bin of=os.img bs=512 count=1 conv=notrunc 2>/dev/null
-    dd if=kernel.bin of=os.img bs=512 seek=1 conv=notrunc 2>/dev/null
-    if [ $? -eq 0 ]; then
-        echo "✅ Образ диска создан"
-        ls -lh os.img
-    else
-        echo "❌ Ошибка создания образа"
-    fi
-}
+echo -e "${YELLOW}Шаг 5/5: Запуск в QEMU...${NC}"
+echo -e "${GREEN}Запуск QEMU. Для выхода нажмите Ctrl+A, затем X${NC}"
 
-run_qemu() {
-    if [ ! -f os.img ]; then
-        echo "❌ Образ os.img не найден. Сначала создайте его."
-        return
-    fi
-    echo "Запуск QEMU..."
-    echo "Нажмите Ctrl+A, затем X для выхода"
-    qemu-system-x86_64 -drive format=raw,file=os.img -m 512M
-}
+# Запуск ISO-образа в QEMU
+if command -v qemu-system-i386 &> /dev/null; then
+    qemu-system-i386 -cdrom $ISO_NAME
+elif command -v qemu-system-x86_64 &> /dev/null; then
+    qemu-system-x86_64 -cdrom $ISO_NAME
+else
+    echo -e "${RED}QEMU не найден. Установите qemu-system-i386 или qemu-system-x86_64${NC}"
+    rm -rf iso
+    exit 1
+fi
 
-full_build() {
-    echo "Полная сборка..."
-    build_bootloader
-    build_kernel
-    create_image
-    echo "✅ Полная сборка завершена"
-}
+# Очистка временных файлов
+rm -rf iso boot.o kernel.o $KERNEL
 
-clean_project() {
-    echo "Очистка проекта..."
-    rm -f *.o *.img *.bin
-    echo "✅ Проект очищен"
-}
-
-# Основной цикл
-while true; do
-    show_menu
-    read -p "Выберите действие (0-6): " choice
-    echo
-    
-    case $choice in
-        1)
-            build_bootloader
-            ;;
-        2)
-            build_kernel
-            ;;
-        3)
-            create_image
-            ;;
-        4)
-            run_qemu
-            ;;
-        5)
-            full_build
-            run_qemu
-            ;;
-        6)
-            clean_project
-            ;;
-        0)
-            echo "До свидания!"
-            exit 0
-            ;;
-        *)
-            echo "Неверный выбор. Попробуйте снова."
-            ;;
-    esac
-    
-    echo
-    read -p "Нажмите Enter для продолжения..."
-    clear
-done
+echo -e "${GREEN}=== Готово! ===${NC}"
