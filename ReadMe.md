@@ -68,4 +68,4 @@ chmod +x build.sh
 - GRUB Multiboot Specification
 
 ---
-*Проект в активной разработке*
+*Проект в активной разработке*(HELP)
