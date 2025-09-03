@@ -213,7 +213,7 @@ void command_about(void) {
     terminal_writestring("Version: 0.2\n");
     terminal_writestring("Features: Keyboard input, Basic shell\n");
     terminal_writestring("Written in: C and Assembly\n");
-    terminal_writestring("Written by: Kavoshnik")
+    terminal_writestring("Written by: Kavoshnik");
     terminal_writestring("\n");
 }
 
