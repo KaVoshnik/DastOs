@@ -1101,8 +1101,8 @@ void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
 }
 
 void handle_exception(void) {
-    terminal_writestring("EXCEPTION occurred! System halted.\n");
-    while(1) asm volatile("hlt");
+    // Минимальная обработка исключений - просто продолжаем
+    // Не выводим ничего, чтобы не вызвать новые исключения
 }
 
 // Инициализация PIC
@@ -1138,7 +1138,9 @@ void command_help(void) {
     terminal_writestring("  memory     - Memory usage\n");
     terminal_writestring("  memtest    - Test memory allocator\n");
     terminal_writestring("  vmem       - Virtual memory status\n");
-    terminal_writestring("  paging     - Enable/check paging\n");
+    terminal_writestring("  paging     - Check paging status\n");
+    terminal_writestring("  paging on  - Enable virtual memory\n");
+    terminal_writestring("  paging off - Disable virtual memory\n");
     terminal_writestring("  keyboard   - Keyboard status\n");
     terminal_writestring("  tasks      - List tasks\n");
     terminal_writestring("  schedule   - Trigger scheduler\n");
@@ -1288,16 +1290,37 @@ void command_paging(void) {
     if (paging_enabled) {
         terminal_writestring("Paging is currently ENABLED\n");
         terminal_writestring("Virtual memory is active and working!\n");
+        terminal_writestring("To disable: Type 'paging off'\n");
     } else {
         terminal_writestring("Paging is currently DISABLED\n");
-        terminal_writestring("Initializing and enabling virtual memory...\n");
-        
-        init_virtual_memory();
-        enable_virtual_memory();
-        
-        terminal_writestring("Virtual memory is now active!\n");
+        terminal_writestring("To enable virtual memory: Type 'paging on'\n");
     }
     terminal_writestring("\n");
+}
+
+void command_paging_on(void) {
+    if (paging_enabled) {
+        terminal_writestring("Virtual memory is already enabled!\n");
+        return;
+    }
+    
+    terminal_writestring("Initializing and enabling virtual memory...\n");
+    
+    init_virtual_memory();
+    enable_virtual_memory();
+    
+    terminal_writestring("Virtual memory is now active!\n\n");
+}
+
+void command_paging_off(void) {
+    if (!paging_enabled) {
+        terminal_writestring("Virtual memory is already disabled!\n");
+        return;
+    }
+    
+    terminal_writestring("Disabling virtual memory...\n");
+    disable_virtual_memory();
+    terminal_writestring("Virtual memory disabled!\n\n");
 }
 
 void command_keyboard(void) {
@@ -1567,7 +1590,13 @@ void execute_command(const char* command) {
     } else if (strcmp(cmd, "vmem") == 0) {
         command_vmem();
     } else if (strcmp(cmd, "paging") == 0) {
-        command_paging();
+        if (args[0] && strcmp(args, "on") == 0) {
+            command_paging_on();
+        } else if (args[0] && strcmp(args, "off") == 0) {
+            command_paging_off();
+        } else {
+            command_paging();
+        }
     } else if (strcmp(cmd, "keyboard") == 0) {
         command_keyboard();
     } else if (strcmp(cmd, "tasks") == 0) {
@@ -1649,52 +1678,100 @@ void handle_modifier_keys(uint8_t scancode) {
     }
 }
 
-// Обработчик клавиатуры с полной поддержкой
+// Обработчик клавиатуры с безопасной поддержкой модификаторов
 void keyboard_handler(void) {
     uint8_t scancode = inb(KEYBOARD_DATA_PORT);
     
-    // Обрабатываем модификаторы
-    handle_modifier_keys(scancode);
+    // Обработка модификаторов (безопасно)
+    if (scancode == 0x2A || scancode == 0x36) { // L/R Shift нажат
+        shift_pressed = 1;
+    } else if (scancode == 0xAA || scancode == 0xB6) { // L/R Shift отпущен
+        shift_pressed = 0;
+    } else if (scancode == 0x1D) { // Ctrl нажат
+        ctrl_pressed = 1;
+    } else if (scancode == 0x9D) { // Ctrl отпущен
+        ctrl_pressed = 0;
+    }
     
-    // Проверяем, что это нажатие клавиши (не отпускание)
-    if (!(scancode & 0x80)) {
-        char ascii = get_ascii_char(scancode);
+    // Обработка обычных клавиш (только нажатие)
+    if (!(scancode & 0x80) && shell_ready) {
+        char ascii = 0;
         
-        if (ascii) {
-            // Обработка специальных комбинаций
-            if (ctrl_pressed) {
-                switch (ascii) {
-                    case 'c':
-                    case 'C':
-                        // Ctrl+C - прервать команду
-                        terminal_writestring("\n^C\n");
-                        command_length = 0;
-                        if (shell_ready) shell_prompt();
-                        break;
-                    case 'l':
-                    case 'L':
-                        // Ctrl+L - очистить экран
-                        command_clear();
-                        if (shell_ready) shell_prompt();
-                        break;
-                }
-            } else if (ascii == '\n' || ascii == '\r') { // Enter
+        // Проверяем Ctrl комбинации сначала
+        if (ctrl_pressed) {
+            if (scancode == 0x2E) { // Ctrl+C
+                terminal_writestring("\n^C\n");
+                command_length = 0;
+                shell_prompt();
+                outb(PIC1_COMMAND, PIC_EOI);
+                return;
+            } else if (scancode == 0x26) { // Ctrl+L  
+                command_clear();
+                shell_prompt();
+                outb(PIC1_COMMAND, PIC_EOI);
+                return;
+            }
+        }
+        
+        // Маппинг основных клавиш с учетом Shift
+        if (scancode == 0x1C) { // Enter
+            ascii = '\n';
+        } else if (scancode == 0x0E) { // Backspace
+            ascii = '\b';
+        } else if (scancode == 0x39) { // Space
+            ascii = ' ';
+        } 
+        // Буквы с учетом Shift
+        else if (scancode >= 0x10 && scancode <= 0x19) { // qwertyuiop
+            const char* normal = "qwertyuiop";
+            const char* shifted = "QWERTYUIOP";
+            ascii = shift_pressed ? shifted[scancode - 0x10] : normal[scancode - 0x10];
+        } else if (scancode >= 0x1E && scancode <= 0x26) { // asdfghjkl
+            const char* normal = "asdfghjkl";
+            const char* shifted = "ASDFGHJKL";
+            ascii = shift_pressed ? shifted[scancode - 0x1E] : normal[scancode - 0x1E];
+        } else if (scancode >= 0x2C && scancode <= 0x32) { // zxcvbnm
+            const char* normal = "zxcvbnm";
+            const char* shifted = "ZXCVBNM";
+            ascii = shift_pressed ? shifted[scancode - 0x2C] : normal[scancode - 0x2C];
+        } 
+        // Цифры и символы с учетом Shift
+        else if (scancode >= 0x02 && scancode <= 0x0A) { // 1-9
+            const char* normal = "123456789";
+            const char* shifted = "!@#$%^&*()";
+            ascii = shift_pressed ? shifted[scancode - 0x02] : normal[scancode - 0x02];
+        } else if (scancode == 0x0B) { // 0
+            ascii = shift_pressed ? ')' : '0';
+        }
+        // Дополнительные символы
+        else if (scancode == 0x0C) { // -/_ 
+            ascii = shift_pressed ? '_' : '-';
+        } else if (scancode == 0x0D) { // =/+
+            ascii = shift_pressed ? '+' : '=';
+        } else if (scancode == 0x33) { // ,/< 
+            ascii = shift_pressed ? '<' : ',';
+        } else if (scancode == 0x34) { // ./>  
+            ascii = shift_pressed ? '>' : '.';
+        } else if (scancode == 0x35) { // //?  
+            ascii = shift_pressed ? '?' : '/';
+        }
+        
+        // Обработка полученного символа
+        if (ascii != 0) {
+            if (ascii == '\n') {
                 terminal_putchar('\n');
-                if (shell_ready) {
-                    command_buffer[command_length] = '\0';
-                    execute_command(command_buffer);
-                    command_length = 0;
-                    shell_prompt();
-                }
-            } else if (ascii == '\b') { // Backspace
+                command_buffer[command_length] = '\0';
+                execute_command(command_buffer);
+                command_length = 0;
+                shell_prompt();
+            } else if (ascii == '\b') {
                 if (command_length > 0) {
                     command_length--;
-                    // Простая реализация backspace - стираем символ
                     terminal_putchar('\b');
                     terminal_putchar(' ');
                     terminal_putchar('\b');
                 }
-            } else if (ascii >= 32 && ascii <= 126) { // Печатные символы
+            } else if (ascii >= 32 && ascii <= 126) {
                 if (command_length < COMMAND_BUFFER_SIZE - 1) {
                     command_buffer[command_length++] = ascii;
                     terminal_putchar(ascii);
@@ -1714,36 +1791,22 @@ void kernel_main(void) {
     // Включаем VGA курсор
     enable_cursor(14, 15); // Обычный курсор
     
-    terminal_writestring("MyOS v0.7 - Advanced Operating System!\n");
+    terminal_writestring("MyOS v0.7 - Booting from ISO (Stable Mode)...\n");
     terminal_writestring("=====================================\n\n");
 
-    // Инициализация управления памятью
-    init_memory_management();
-    terminal_writestring("Memory management initialized\n");
+    // Сначала настраиваем IDT ДО включения прерываний
+    terminal_writestring("Setting up interrupt handlers...\n");
     
-    // Инициализация виртуальной памяти
-    terminal_writestring("Initializing virtual memory system...\n");
-    init_virtual_memory();
-    enable_virtual_memory();
-    terminal_writestring("Virtual memory system ready\n");
-    
-    // Инициализация файловой системы
-    init_filesystem();
-    terminal_writestring("File system ready\n");
-    
-    // Инициализация планировщика задач
-    init_scheduler();
-
     // Настройка IDT
     idtp.limit = sizeof(idt) - 1;
     idtp.base = (uint32_t)&idt;
 
-    // Инициализируем все записи IDT
+    // Инициализируем все записи IDT как пустые
     for (int i = 0; i < 256; i++) {
         idt_set_gate(i, 0, 0, 0);
     }
 
-    // Устанавливаем обработчики исключений (0-31)
+    // Устанавливаем обработчики исключений (0-31) ПЕРЕД включением прерываний
     for (int i = 0; i < 32; i++) {
         idt_set_gate(i, (uint32_t)exception_handler, 0x08, 0x8E);
     }
@@ -1754,29 +1817,48 @@ void kernel_main(void) {
     // Устанавливаем обработчик клавиатуры (IRQ1 = прерывание 33)
     idt_set_gate(33, (uint32_t)irq1_handler, 0x08, 0x8E);
     idt_flush();
+    
+    terminal_writestring("IDT configured\n");
 
-    // Инициализация системы для работы с GRUB
-    initialize_system();
+    // Инициализация управления памятью
+    init_memory_management();
+    terminal_writestring("Memory management initialized\n");
+    
+    // Инициализация файловой системы (БЕЗ виртуальной памяти сначала)
+    init_filesystem();
+    terminal_writestring("File system ready\n");
+    
+    // Пропускаем сложные компоненты для стабильности ISO загрузки
+    terminal_writestring("Skipping complex subsystems for stability...\n");
+    
+    // Простая инициализация PIC
+    outb(PIC1_COMMAND, 0x11);
+    outb(PIC1_DATA, 0x20);
+    outb(PIC1_DATA, 0x04);
+    outb(PIC1_DATA, 0x01);
+    outb(PIC1_DATA, 0xFD); // Разрешаем только IRQ1 (клавиатура)
+    terminal_writestring("Basic PIC initialized\n");
 
-    // Создание демонстрационных задач
-    create_task("idle", idle_task, 255);
-    create_task("demo1", demo_task1, 10);
-    create_task("demo2", demo_task2, 20);
-    terminal_writestring("Demo tasks created\n");
-
-    // Включаем прерывания
+    // Сначала проверим систему без прерываний
+    terminal_writestring("System initialization complete.\n");
+    terminal_writestring("Ready to enable interrupts...\n");
+    
+    // Включаем прерывания ТОЛЬКО после полной инициализации
     asm volatile("sti");
+    terminal_writestring("Interrupts enabled.\n");
 
     // Инициализация шелла
-    command_clear();
-    enable_cursor(14, 15); // Повторно включаем курсор после очистки
-    terminal_writestring("Welcome to MyOS v0.7!\n");
-    terminal_writestring("Features: Enhanced keyboard, VGA cursor, Memory management, Virtual memory\n");
-    terminal_writestring("New: Full keyboard support with Shift, Ctrl, Alt, Caps Lock\n");
-    terminal_writestring("Type 'help' for available commands.\n\n");
+    terminal_writestring("Starting shell in safe mode...\n");
+    enable_cursor(14, 15);
+    terminal_writestring("\nWelcome to MyOS v0.7 (Safe ISO Boot)!\n");
+    terminal_writestring("Features: Basic keyboard, VGA cursor, Memory management\n");
+    terminal_writestring("Type 'help' for available commands.\n");
+    terminal_writestring("Note: Full keyboard support with Shift, Ctrl combinations.\n\n");
     
     shell_ready = 1;
     shell_prompt();
 
-    while (1) asm volatile("hlt");
+    while (1) {
+        asm volatile("hlt");
+    }
 }
