@@ -8,8 +8,11 @@ typedef unsigned int   uint32_t;
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
 #define KEYBOARD_DATA_PORT 0x60
+#define KEYBOARD_STATUS_PORT 0x64
 #define PIC1_COMMAND 0x20
 #define PIC1_DATA 0x21
+#define PIC2_COMMAND 0xA0
+#define PIC2_DATA 0xA1
 #define PIC_EOI 0x20
 
 // IDT структуры
@@ -48,6 +51,15 @@ static inline uint8_t inb(uint16_t port) {
     return ret;
 }
 
+// Управление курсором
+void update_cursor(int x, int y) {
+    uint16_t pos = y * VGA_WIDTH + x;
+    outb(0x3D4, 0x0F);
+    outb(0x3D5, (uint8_t)(pos & 0xFF));
+    outb(0x3D4, 0x0E);
+    outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
+}
+
 // Терминал
 void terminal_clear(void) {
     uint16_t* video = (uint16_t*)VGA_MEMORY;
@@ -55,28 +67,52 @@ void terminal_clear(void) {
         video[i] = 0x0720; // Пробел с белым текстом
     }
     terminal_row = terminal_column = 0;
+    update_cursor(terminal_column, terminal_row);
 }
 
 void terminal_putchar(char c) {
+    uint16_t* video = (uint16_t*)VGA_MEMORY;
+    
     if (c == '\n') {
         terminal_column = 0;
-        if (++terminal_row >= VGA_HEIGHT) terminal_row = VGA_HEIGHT - 1;
+        if (++terminal_row >= VGA_HEIGHT) {
+            // Простая прокрутка экрана
+            for (int i = 0; i < (VGA_HEIGHT - 1) * VGA_WIDTH; i++) {
+                video[i] = video[i + VGA_WIDTH];
+            }
+            for (int i = (VGA_HEIGHT - 1) * VGA_WIDTH; i < VGA_HEIGHT * VGA_WIDTH; i++) {
+                video[i] = 0x0720;
+            }
+            terminal_row = VGA_HEIGHT - 1;
+        }
+        update_cursor(terminal_column, terminal_row);
         return;
     }
     
     if (c == '\b' && terminal_column > 0) {
         terminal_column--;
-        uint16_t* video = (uint16_t*)VGA_MEMORY;
         video[terminal_row * VGA_WIDTH + terminal_column] = 0x0720;
+        update_cursor(terminal_column, terminal_row);
         return;
     }
     
-    uint16_t* video = (uint16_t*)VGA_MEMORY;
-    video[terminal_row * VGA_WIDTH + terminal_column] = (0x07 << 8) | c;
-    
-    if (++terminal_column >= VGA_WIDTH) {
-        terminal_column = 0;
-        if (++terminal_row >= VGA_HEIGHT) terminal_row = VGA_HEIGHT - 1;
+    if (c >= 32 && c <= 126) { // Только печатные символы
+        video[terminal_row * VGA_WIDTH + terminal_column] = (0x07 << 8) | c;
+        
+        if (++terminal_column >= VGA_WIDTH) {
+            terminal_column = 0;
+            if (++terminal_row >= VGA_HEIGHT) {
+                // Простая прокрутка экрана
+                for (int i = 0; i < (VGA_HEIGHT - 1) * VGA_WIDTH; i++) {
+                    video[i] = video[i + VGA_WIDTH];
+                }
+                for (int i = (VGA_HEIGHT - 1) * VGA_WIDTH; i < VGA_HEIGHT * VGA_WIDTH; i++) {
+                    video[i] = 0x0720;
+                }
+                terminal_row = VGA_HEIGHT - 1;
+            }
+        }
+        update_cursor(terminal_column, terminal_row);
     }
 }
 
@@ -95,16 +131,50 @@ void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
 
 extern void idt_flush(void);
 extern void irq1_handler(void);
+extern void exception_handler(void);
+
+// Отладочные функции
+void debug_print(const char* msg) {
+    terminal_writestring("[DEBUG] ");
+    terminal_writestring(msg);
+    terminal_writestring("\n");
+}
+
+void handle_exception(void) {
+    debug_print("EXCEPTION OCCURRED! System halted.");
+    while(1) asm volatile("hlt");
+}
 
 // Обработчик клавиатуры
 void keyboard_handler(void) {
+    // Отладка - показываем, что обработчик вызван
+    debug_print("Keyboard interrupt received");
+    
+    // Проверяем статус клавиатуры
+    uint8_t status = inb(KEYBOARD_STATUS_PORT);
+    if (!(status & 0x01)) {
+        // Нет данных для чтения
+        outb(PIC1_COMMAND, PIC_EOI);
+        return;
+    }
+    
     // Читаем скан-код из порта клавиатуры
     uint8_t scancode = inb(KEYBOARD_DATA_PORT);
+    
+    // Отладочный вывод scan-кода
+    terminal_writestring("[Key: 0x");
+    // Простой вывод hex-кода
+    char hex[3];
+    hex[0] = (scancode >> 4) < 10 ? '0' + (scancode >> 4) : 'A' + (scancode >> 4) - 10;
+    hex[1] = (scancode & 0xF) < 10 ? '0' + (scancode & 0xF) : 'A' + (scancode & 0xF) - 10;
+    hex[2] = '\0';
+    terminal_writestring(hex);
+    terminal_writestring("] ");
     
     // Проверяем, что это нажатие клавиши (не отпускание)
     if (!(scancode & 0x80) && scancode < 128) {
         char ascii = scancode_to_ascii[scancode];
-        if (ascii) {
+        if (ascii && ascii >= 32 && ascii <= 126) {
             terminal_putchar(ascii);
         }
     }
@@ -123,12 +193,21 @@ void kernel_main(void) {
     idtp.limit = sizeof(idt) - 1;
     idtp.base = (uint32_t)&idt;
     
+    // Инициализируем все записи IDT
     for (int i = 0; i < 256; i++) {
         idt_set_gate(i, 0, 0, 0);
     }
     
+    // Устанавливаем обработчики исключений (0-31)
+    for (int i = 0; i < 32; i++) {
+        idt_set_gate(i, (uint32_t)exception_handler, 0x08, 0x8E);
+    }
+    
+    debug_print("IDT exceptions configured");
+    
     // Устанавливаем обработчик клавиатуры (IRQ1 = прерывание 33)
     idt_set_gate(33, (uint32_t)irq1_handler, 0x08, 0x8E);
+    debug_print("Keyboard handler installed");
     idt_flush();
     
     // Настройка PIC (Программируемый контроллер прерываний)

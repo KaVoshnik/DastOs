@@ -35,6 +35,36 @@ irq1_handler:
     ; Выходим из прерывания
     iret
 
+; Обработчик общих исключений
+global exception_handler
+exception_handler:
+    pusha
+    push ds
+    push es
+    push fs 
+    push gs
+    
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    
+    extern handle_exception
+    call handle_exception
+    
+    pop gs
+    pop fs
+    pop es
+    pop ds
+    popa
+    
+    ; Добавляем бесконечный цикл вместо iret для исключений
+    cli
+.hang:
+    hlt
+    jmp .hang
+
 global idt_flush
 idt_flush:
     extern idtp
