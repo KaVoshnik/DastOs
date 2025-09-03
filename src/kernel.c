@@ -23,6 +23,27 @@ typedef unsigned int   size_t;
 #define HEAP_SIZE  0x100000    // Размер кучи (1 MB)
 #define BLOCK_SIZE sizeof(memory_block_t)
 
+// Виртуальная память и пейджинг
+#define PAGE_SIZE           4096        // Размер страницы 4KB
+#define PAGE_ENTRIES        1024        // Количество записей в таблице страниц
+#define PAGE_DIRECTORY_SIZE PAGE_ENTRIES * sizeof(uint32_t)
+#define PAGE_TABLE_SIZE     PAGE_ENTRIES * sizeof(uint32_t)
+
+// Флаги для Page Directory Entry и Page Table Entry
+#define PAGE_PRESENT     0x001  // Страница присутствует в памяти
+#define PAGE_WRITABLE    0x002  // Страница доступна для записи
+#define PAGE_USER        0x004  // Страница доступна пользователю
+#define PAGE_PWT         0x008  // Page Write Through
+#define PAGE_PCD         0x010  // Page Cache Disable
+#define PAGE_ACCESSED    0x020  // Страница была accessed
+#define PAGE_DIRTY       0x040  // Страница была изменена
+#define PAGE_PS          0x080  // Page Size (только для PDE)
+#define PAGE_GLOBAL      0x100  // Глобальная страница
+
+// Адреса для размещения структур пейджинга
+#define PAGE_DIRECTORY_ADDR  0x300000   // 3MB - Page Directory
+#define PAGE_TABLES_ADDR     0x301000   // 3MB+4KB - Page Tables
+
 // IDT структуры
 struct idt_entry {
     uint16_t base_lo, sel;
@@ -43,6 +64,20 @@ typedef struct memory_block {
     struct memory_block* prev;      // Указатель на предыдущий блок
 } memory_block_t;
 
+// Структуры для виртуальной памяти
+typedef uint32_t page_directory_entry_t;   // PDE - 32-битная запись
+typedef uint32_t page_table_entry_t;       // PTE - 32-битная запись
+
+// Структура Page Directory
+typedef struct {
+    page_directory_entry_t entries[PAGE_ENTRIES];
+} page_directory_t;
+
+// Структура Page Table
+typedef struct {
+    page_table_entry_t entries[PAGE_ENTRIES];
+} page_table_t;
+
 // Глобальные переменные
 struct idt_entry idt[256];
 struct idt_ptr idtp;
@@ -53,6 +88,23 @@ memory_block_t* heap_start = NULL;
 uint32_t total_memory = 0;
 uint32_t free_memory = 0;
 uint32_t used_memory = 0;
+
+// Переменные виртуальной памяти
+page_directory_t* page_directory = (page_directory_t*)PAGE_DIRECTORY_ADDR;
+page_table_t* page_tables = (page_table_t*)PAGE_TABLES_ADDR;
+int paging_enabled = 0;
+
+// Предварительные объявления всех функций
+void terminal_writestring(const char* data);
+void terminal_putchar(char c);
+void print_number(uint32_t num);
+
+// Функции для работы с виртуальной памятью (из interrupts.asm)
+extern void enable_paging(uint32_t page_directory_addr);
+extern void disable_paging(void);
+extern uint32_t get_page_fault_address(void);
+extern void flush_tlb(void);
+extern void page_fault_handler(void);
 
 // Scancode таблица
 const char scancode_to_ascii[128] = {
@@ -178,6 +230,126 @@ void get_memory_info(uint32_t* total, uint32_t* free, uint32_t* used) {
     *total = total_memory;
     *free = free_memory;
     *used = used_memory;
+}
+
+// === ФУНКЦИИ ВИРТУАЛЬНОЙ ПАМЯТИ ===
+
+// Создание записи Page Directory Entry
+uint32_t create_pde(uint32_t page_table_addr, uint32_t flags) {
+    return (page_table_addr & 0xFFFFF000) | (flags & 0xFFF);
+}
+
+// Создание записи Page Table Entry  
+uint32_t create_pte(uint32_t physical_addr, uint32_t flags) {
+    return (physical_addr & 0xFFFFF000) | (flags & 0xFFF);
+}
+
+// Получение адреса Page Table из PDE
+uint32_t get_page_table_addr(uint32_t pde) {
+    return pde & 0xFFFFF000;
+}
+
+// Получение физического адреса из PTE
+uint32_t get_physical_addr(uint32_t pte) {
+    return pte & 0xFFFFF000;
+}
+
+// Инициализация системы виртуальной памяти
+void init_virtual_memory(void) {
+    terminal_writestring("Initializing virtual memory...\n");
+    
+    // Очищаем Page Directory
+    for (int i = 0; i < PAGE_ENTRIES; i++) {
+        page_directory->entries[i] = 0;
+    }
+    
+    // Создаем identity mapping для первых 4MB памяти (ядро)
+    // Используем первую Page Table для этого
+    page_table_t* kernel_page_table = &page_tables[0];
+    
+    // Заполняем первую Page Table identity mapping
+    for (int i = 0; i < PAGE_ENTRIES; i++) {
+        uint32_t physical_addr = i * PAGE_SIZE;  // 0x0, 0x1000, 0x2000...
+        kernel_page_table->entries[i] = create_pte(physical_addr, 
+            PAGE_PRESENT | PAGE_WRITABLE);
+    }
+    
+    // Записываем первую PDE чтобы указать на первую Page Table
+    uint32_t kernel_page_table_addr = (uint32_t)kernel_page_table;
+    page_directory->entries[0] = create_pde(kernel_page_table_addr, 
+        PAGE_PRESENT | PAGE_WRITABLE);
+    
+    terminal_writestring("Identity mapping for kernel created\n");
+    
+    // Создаем mapping для кучи (начиная с 4MB)
+    uint32_t heap_start_page = HEAP_START / PAGE_SIZE;  // Номер страницы для 4MB
+    uint32_t heap_directory_index = heap_start_page / PAGE_ENTRIES;
+    uint32_t heap_page_index = heap_start_page % PAGE_ENTRIES;
+    
+    // Используем вторую Page Table для кучи
+    page_table_t* heap_page_table = &page_tables[1];
+    
+    // Заполняем Page Table для кучи
+    for (int i = 0; i < PAGE_ENTRIES; i++) {
+        uint32_t physical_addr = HEAP_START + (i * PAGE_SIZE);
+        heap_page_table->entries[i] = create_pte(physical_addr, 
+            PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    }
+    
+    // Записываем PDE для кучи
+    uint32_t heap_page_table_addr = (uint32_t)heap_page_table;
+    page_directory->entries[heap_directory_index] = create_pde(heap_page_table_addr, 
+        PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+        
+    terminal_writestring("Heap mapping created\n");
+}
+
+// Включение виртуальной памяти
+void enable_virtual_memory(void) {
+    if (paging_enabled) {
+        terminal_writestring("Paging is already enabled\n");
+        return;
+    }
+    
+    terminal_writestring("Enabling paging...\n");
+    
+    // Включаем пейджинг через ассемблерную функцию
+    enable_paging((uint32_t)page_directory);
+    paging_enabled = 1;
+    
+    terminal_writestring("Virtual memory enabled successfully!\n");
+}
+
+// Отключение виртуальной памяти
+void disable_virtual_memory(void) {
+    if (!paging_enabled) {
+        terminal_writestring("Paging is not enabled\n");
+        return;
+    }
+    
+    terminal_writestring("Disabling paging...\n");
+    disable_paging();
+    paging_enabled = 0;
+    terminal_writestring("Virtual memory disabled\n");
+}
+
+// Обработчик Page Fault
+void handle_page_fault(void) {
+    uint32_t fault_address = get_page_fault_address();
+    
+    terminal_writestring("PAGE FAULT occurred!\n");
+    terminal_writestring("Fault address: 0x");
+    
+    // Выводим адрес в hex формате
+    for (int i = 28; i >= 0; i -= 4) {
+        uint32_t nibble = (fault_address >> i) & 0xF;
+        char hex_char = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+        terminal_putchar(hex_char);
+    }
+    terminal_putchar('\n');
+    
+    terminal_writestring("System halted due to page fault.\n");
+    while(1) asm volatile("hlt");
 }
 
 // Управление курсором
@@ -356,14 +528,17 @@ void command_help(void) {
     terminal_writestring("  about    - Show system information\n");
     terminal_writestring("  memory   - Show memory usage\n");
     terminal_writestring("  memtest  - Test memory allocation\n");
+    terminal_writestring("  vmem     - Show virtual memory status\n");
+    terminal_writestring("  paging   - Enable/disable paging\n");
     terminal_writestring("  reboot   - Restart the system\n");
+    terminal_writestring("  poweroff - Shutdown the system\n");
     terminal_writestring("\n");
 }
 
 void command_about(void) {
     terminal_writestring("MyOS - Simple Operating System\n");
-    terminal_writestring("Version: 0.3 (with Memory Management)\n");
-    terminal_writestring("Features: Keyboard input, Shell, Memory management\n");
+    terminal_writestring("Version: 0.4 (with Virtual Memory)\n");
+    terminal_writestring("Features: Keyboard, Shell, Memory & Virtual Memory\n");
     terminal_writestring("Written in: C and Assembly\n");
     terminal_writestring("Written by: Kavoshnik\n");
     terminal_writestring("\n");
@@ -431,6 +606,74 @@ void command_reboot(void) {
     while(1) asm volatile("hlt");
 }
 
+void command_poweroff(void) {
+    terminal_writestring("Shutting down system...\n");
+    
+    // Попытка ACPI shutdown через порт 0x604 (QEMU)
+    outb(0x604, 0x20);
+    outb(0x605, 0x00);
+    
+    // Альтернативный метод для QEMU - порт 0xB004
+    outb(0xB004, 0x20);
+    outb(0xB005, 0x00);
+    
+    // Если ничего не помогло, просто останавливаем систему
+    terminal_writestring("System halted. You can close the emulator.\n");
+    asm volatile("cli");
+    while(1) asm volatile("hlt");
+}
+
+// Вспомогательная функция для вывода чисел в hex формате
+void print_number_hex(uint32_t num) {
+    for (int i = 28; i >= 0; i -= 4) {
+        uint32_t nibble = (num >> i) & 0xF;
+        char hex_char = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+        terminal_putchar(hex_char);
+    }
+}
+
+void command_vmem(void) {
+    terminal_writestring("Virtual Memory Status:\n");
+    terminal_writestring("  Paging: ");
+    if (paging_enabled) {
+        terminal_writestring("ENABLED\n");
+    } else {
+        terminal_writestring("DISABLED\n");
+    }
+    
+    terminal_writestring("  Page Directory: 0x");
+    print_number_hex((uint32_t)page_directory);
+    terminal_writestring("\n");
+    
+    terminal_writestring("  Page Tables: 0x");
+    print_number_hex((uint32_t)page_tables);
+    terminal_writestring("\n");
+    
+    terminal_writestring("  Page Size: ");
+    print_number(PAGE_SIZE);
+    terminal_writestring(" bytes\n");
+    
+    terminal_writestring("  Entries per table: ");
+    print_number(PAGE_ENTRIES);
+    terminal_writestring("\n\n");
+}
+
+void command_paging(void) {
+    if (paging_enabled) {
+        terminal_writestring("Paging is currently ENABLED\n");
+        terminal_writestring("Virtual memory is active and working!\n");
+    } else {
+        terminal_writestring("Paging is currently DISABLED\n");
+        terminal_writestring("Initializing and enabling virtual memory...\n");
+        
+        init_virtual_memory();
+        enable_virtual_memory();
+        
+        terminal_writestring("Virtual memory is now active!\n");
+    }
+    terminal_writestring("\n");
+}
+
 // Простое сравнение строк
 int strcmp(const char* str1, const char* str2) {
     while (*str1 && (*str1 == *str2)) {
@@ -454,8 +697,14 @@ void execute_command(const char* command) {
         command_memory();
     } else if (strcmp(command, "memtest") == 0) {
         command_memtest();
+    } else if (strcmp(command, "vmem") == 0) {
+        command_vmem();
+    } else if (strcmp(command, "paging") == 0) {
+        command_paging();
     } else if (strcmp(command, "reboot") == 0) {
         command_reboot();
+    } else if (strcmp(command, "poweroff") == 0) {
+        command_poweroff();
     } else {
         terminal_writestring("Unknown command: ");
         terminal_writestring(command);
@@ -511,6 +760,12 @@ void kernel_main(void) {
     // Инициализация управления памятью
     init_memory_management();
     terminal_writestring("Memory management initialized\n");
+    
+    // Инициализация виртуальной памяти
+    terminal_writestring("Initializing virtual memory system...\n");
+    init_virtual_memory();
+    enable_virtual_memory();
+    terminal_writestring("Virtual memory system ready\n");
 
     // Настройка IDT
     idtp.limit = sizeof(idt) - 1;
@@ -525,6 +780,9 @@ void kernel_main(void) {
     for (int i = 0; i < 32; i++) {
         idt_set_gate(i, (uint32_t)exception_handler, 0x08, 0x8E);
     }
+    
+    // Устанавливаем специальный обработчик Page Fault (исключение 14)
+    idt_set_gate(14, (uint32_t)page_fault_handler, 0x08, 0x8E);
 
     // Устанавливаем обработчик клавиатуры (IRQ1 = прерывание 33)
     idt_set_gate(33, (uint32_t)irq1_handler, 0x08, 0x8E);
@@ -538,10 +796,8 @@ void kernel_main(void) {
 
     // Инициализация шелла
     command_clear();
-    terminal_writestring("Welcome to MyOS with Memory Management!\n");
+    terminal_writestring("Welcome to MyOS with Virtual Memory!\n");
     terminal_writestring("Type 'help' for available commands.\n");
-    terminal_writestring("Type 'memory' to see memory usage.\n");
-    terminal_writestring("Type 'memtest' to test memory allocation.\n\n");
     
     shell_ready = 1;
     shell_prompt();
