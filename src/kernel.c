@@ -62,6 +62,21 @@ typedef unsigned int   size_t;
 #define TASK_STATE_BLOCKED  2           // Заблокирована
 #define TASK_STATE_DEAD     3           // Завершена
 
+// VGA курсор
+#define VGA_CURSOR_COMMAND_PORT 0x3D4
+#define VGA_CURSOR_DATA_PORT 0x3D5
+
+// Клавиатура
+#define KEY_LSHIFT_PRESSED   0x2A
+#define KEY_LSHIFT_RELEASED  0xAA
+#define KEY_RSHIFT_PRESSED   0x36
+#define KEY_RSHIFT_RELEASED  0xB6
+#define KEY_CTRL_PRESSED     0x1D
+#define KEY_CTRL_RELEASED    0x9D
+#define KEY_ALT_PRESSED      0x38
+#define KEY_ALT_RELEASED     0xB8
+#define KEY_CAPS_LOCK        0x3A
+
 // Шелл
 #define COMMAND_BUFFER_SIZE 256
 
@@ -191,6 +206,12 @@ char command_buffer[COMMAND_BUFFER_SIZE];
 int command_length = 0;
 int shell_ready = 0;
 
+// Состояние клавиатуры
+int shift_pressed = 0;
+int ctrl_pressed = 0;
+int alt_pressed = 0;
+int caps_lock_on = 0;
+
 // Предварительные объявления всех функций
 void terminal_writestring(const char* data);
 void terminal_putchar(char c);
@@ -225,12 +246,27 @@ extern void irq1_handler(void);
 extern void exception_handler(void);
 extern void idt_flush(void);
 
-// Scancode таблица
-const char scancode_to_ascii[128] = {
+// Scancode таблицы для разных режимов
+const char scancode_normal[128] = {
     0, 27, '1','2','3','4','5','6','7','8','9','0','-','=','\b','\t',
     'q','w','e','r','t','y','u','i','o','p','[',']','\n',0,
     'a','s','d','f','g','h','j','k','l',';','\'','`',0,'\\',
-    'z','x','c','v','b','n','m',',','.','/',0,'*',0,' '
+    'z','x','c','v','b','n','m',',','.','/',0,'*',0,' ',
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+};
+
+const char scancode_shift[128] = {
+    0, 27, '!','@','#','$','%','^','&','*','(',')','_','+','\b','\t',
+    'Q','W','E','R','T','Y','U','I','O','P','{','}','\n',0,
+    'A','S','D','F','G','H','J','K','L',':','"','~',0,'|',
+    'Z','X','C','V','B','N','M','<','>','?',0,'*',0,' ',
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 };
 
 // Порты
@@ -283,6 +319,29 @@ void strcpy(char* dest, const char* src) {
 
 // === ФУНКЦИИ ТЕРМИНАЛА ===
 
+// Функции для управления VGA курсором
+void update_cursor(int x, int y) {
+    uint16_t pos = y * VGA_WIDTH + x;
+    
+    outb(VGA_CURSOR_COMMAND_PORT, 0x0F);
+    outb(VGA_CURSOR_DATA_PORT, (uint8_t)(pos & 0xFF));
+    outb(VGA_CURSOR_COMMAND_PORT, 0x0E);
+    outb(VGA_CURSOR_DATA_PORT, (uint8_t)((pos >> 8) & 0xFF));
+}
+
+void enable_cursor(uint8_t cursor_start, uint8_t cursor_end) {
+    outb(VGA_CURSOR_COMMAND_PORT, 0x0A);
+    outb(VGA_CURSOR_DATA_PORT, (inb(VGA_CURSOR_DATA_PORT) & 0xC0) | cursor_start);
+    
+    outb(VGA_CURSOR_COMMAND_PORT, 0x0B);
+    outb(VGA_CURSOR_DATA_PORT, (inb(VGA_CURSOR_DATA_PORT) & 0xE0) | cursor_end);
+}
+
+void disable_cursor() {
+    outb(VGA_CURSOR_COMMAND_PORT, 0x0A);
+    outb(VGA_CURSOR_DATA_PORT, 0x20);
+}
+
 void terminal_clear(void) {
     uint16_t* video_memory = (uint16_t*)VGA_MEMORY;
     for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
@@ -290,6 +349,7 @@ void terminal_clear(void) {
     }
     terminal_row = 0;
     terminal_column = 0;
+    update_cursor(terminal_column, terminal_row);
 }
 
 void terminal_putchar(char c) {
@@ -303,6 +363,7 @@ void terminal_putchar(char c) {
             terminal_column--;
             video_memory[terminal_row * VGA_WIDTH + terminal_column] = 0x0720;
         }
+        update_cursor(terminal_column, terminal_row);
         return;
     } else {
         video_memory[terminal_row * VGA_WIDTH + terminal_column] = (0x07 << 8) | c;
@@ -324,6 +385,8 @@ void terminal_putchar(char c) {
         }
         terminal_row = VGA_HEIGHT - 1;
     }
+    
+    update_cursor(terminal_column, terminal_row);
 }
 
 void terminal_writestring(const char* data) {
@@ -1078,6 +1141,7 @@ void command_help(void) {
     terminal_writestring("  memtest    - Test memory allocator\n");
     terminal_writestring("  vmem       - Virtual memory status\n");
     terminal_writestring("  paging     - Enable/check paging\n");
+    terminal_writestring("  keyboard   - Keyboard status\n");
     terminal_writestring("  tasks      - List tasks\n");
     terminal_writestring("  schedule   - Trigger scheduler\n");
     terminal_writestring("  ls         - List files\n");
@@ -1087,6 +1151,8 @@ void command_help(void) {
     terminal_writestring("  echo <t> > <f> - Write text to file\n");
     terminal_writestring("  reboot     - Restart system\n");
     terminal_writestring("  poweroff   - Shutdown system\n");
+    terminal_writestring("\nKeyboard features: Shift, Ctrl, Alt, Caps Lock support\n");
+    terminal_writestring("Special keys: Ctrl+C (cancel), Ctrl+L (clear)\n");
     terminal_writestring("\n");
 }
 
@@ -1095,16 +1161,23 @@ void command_clear(void) {
 }
 
 void command_about(void) {
-    terminal_writestring("MyOS v0.6 - Advanced Operating System\n");
-    terminal_writestring("================================\n");
+    terminal_writestring("MyOS v0.7 - Enhanced Operating System\n");
+    terminal_writestring("====================================\n");
     terminal_writestring("Features:\n");
     terminal_writestring("  - 32-bit protected mode\n");
     terminal_writestring("  - Dynamic memory management\n");
     terminal_writestring("  - Virtual memory with paging\n");
     terminal_writestring("  - Simple file system\n");
     terminal_writestring("  - Basic task scheduler\n");
+    terminal_writestring("  - Enhanced keyboard support\n");
+    terminal_writestring("  - VGA cursor support\n");
     terminal_writestring("  - Interrupt handling\n");
-    terminal_writestring("  - Command shell\n");
+    terminal_writestring("  - Interactive command shell\n");
+    terminal_writestring("\nNew in v0.7:\n");
+    terminal_writestring("  - Full keyboard modifier support\n");
+    terminal_writestring("  - Proper VGA cursor positioning\n");
+    terminal_writestring("  - Shift/Ctrl/Alt key combinations\n");
+    terminal_writestring("  - Caps Lock functionality\n");
     terminal_writestring("\nBuilt with Assembly and C\n");
     terminal_writestring("For x86 architecture\n\n");
 }
@@ -1227,6 +1300,47 @@ void command_paging(void) {
         terminal_writestring("Virtual memory is now active!\n");
     }
     terminal_writestring("\n");
+}
+
+void command_keyboard(void) {
+    terminal_writestring("Keyboard Status:\n");
+    
+    terminal_writestring("  Modifier Keys:\n");
+    terminal_writestring("    Shift: ");
+    if (shift_pressed) {
+        terminal_writestring("PRESSED\n");
+    } else {
+        terminal_writestring("Released\n");
+    }
+    
+    terminal_writestring("    Ctrl:  ");
+    if (ctrl_pressed) {
+        terminal_writestring("PRESSED\n");
+    } else {
+        terminal_writestring("Released\n");
+    }
+    
+    terminal_writestring("    Alt:   ");
+    if (alt_pressed) {
+        terminal_writestring("PRESSED\n");
+    } else {
+        terminal_writestring("Released\n");
+    }
+    
+    terminal_writestring("  Caps Lock: ");
+    if (caps_lock_on) {
+        terminal_writestring("ON\n");
+    } else {
+        terminal_writestring("OFF\n");
+    }
+    
+    terminal_writestring("\n  Features:\n");
+    terminal_writestring("    - Full scancode support\n");
+    terminal_writestring("    - Shift for uppercase and symbols\n");
+    terminal_writestring("    - Caps Lock toggle\n");
+    terminal_writestring("    - Ctrl+C to cancel commands\n");
+    terminal_writestring("    - Ctrl+L to clear screen\n");
+    terminal_writestring("\n  Try typing with different modifiers!\n\n");
 }
 
 // === КОМАНДЫ ПЛАНИРОВЩИКА ===
@@ -1456,6 +1570,8 @@ void execute_command(const char* command) {
         command_vmem();
     } else if (strcmp(cmd, "paging") == 0) {
         command_paging();
+    } else if (strcmp(cmd, "keyboard") == 0) {
+        command_keyboard();
     } else if (strcmp(cmd, "tasks") == 0) {
         command_tasks();
     } else if (strcmp(cmd, "schedule") == 0) {
@@ -1482,16 +1598,89 @@ void execute_command(const char* command) {
     }
 }
 
-// Обработчик клавиатуры с поддержкой шелла
+// Получение символа с учетом модификаторов
+char get_ascii_char(uint8_t scancode) {
+    if (scancode >= 128) return 0;
+    
+    char base_char;
+    int use_shift = shift_pressed;
+    
+    // Проверяем Caps Lock для букв
+    if (caps_lock_on && scancode >= 16 && scancode <= 50) {
+        char c = scancode_normal[scancode];
+        if (c >= 'a' && c <= 'z') {
+            use_shift = !use_shift; // Инвертируем shift для букв
+        }
+    }
+    
+    if (use_shift) {
+        base_char = scancode_shift[scancode];
+    } else {
+        base_char = scancode_normal[scancode];
+    }
+    
+    return base_char;
+}
+
+// Обработка модификаторов
+void handle_modifier_keys(uint8_t scancode) {
+    switch (scancode) {
+        case KEY_LSHIFT_PRESSED:
+        case KEY_RSHIFT_PRESSED:
+            shift_pressed = 1;
+            break;
+        case KEY_LSHIFT_RELEASED:
+        case KEY_RSHIFT_RELEASED:
+            shift_pressed = 0;
+            break;
+        case KEY_CTRL_PRESSED:
+            ctrl_pressed = 1;
+            break;
+        case KEY_CTRL_RELEASED:
+            ctrl_pressed = 0;
+            break;
+        case KEY_ALT_PRESSED:
+            alt_pressed = 1;
+            break;
+        case KEY_ALT_RELEASED:
+            alt_pressed = 0;
+            break;
+        case KEY_CAPS_LOCK:
+            caps_lock_on = !caps_lock_on;
+            break;
+    }
+}
+
+// Обработчик клавиатуры с полной поддержкой
 void keyboard_handler(void) {
     uint8_t scancode = inb(KEYBOARD_DATA_PORT);
     
+    // Обрабатываем модификаторы
+    handle_modifier_keys(scancode);
+    
     // Проверяем, что это нажатие клавиши (не отпускание)
-    if (!(scancode & 0x80) && scancode < 128) {
-        char ascii = scancode_to_ascii[scancode];
+    if (!(scancode & 0x80)) {
+        char ascii = get_ascii_char(scancode);
         
         if (ascii) {
-            if (ascii == '\n' || ascii == '\r') { // Enter
+            // Обработка специальных комбинаций
+            if (ctrl_pressed) {
+                switch (ascii) {
+                    case 'c':
+                    case 'C':
+                        // Ctrl+C - прервать команду
+                        terminal_writestring("\n^C\n");
+                        command_length = 0;
+                        if (shell_ready) shell_prompt();
+                        break;
+                    case 'l':
+                    case 'L':
+                        // Ctrl+L - очистить экран
+                        command_clear();
+                        if (shell_ready) shell_prompt();
+                        break;
+                }
+            } else if (ascii == '\n' || ascii == '\r') { // Enter
                 terminal_putchar('\n');
                 if (shell_ready) {
                     command_buffer[command_length] = '\0';
@@ -1523,7 +1712,11 @@ void keyboard_handler(void) {
 // Главная функция
 void kernel_main(void) {
     terminal_clear();
-    terminal_writestring("MyOS v0.6 - Advanced Operating System!\n");
+    
+    // Включаем VGA курсор
+    enable_cursor(14, 15); // Обычный курсор
+    
+    terminal_writestring("MyOS v0.7 - Advanced Operating System!\n");
     terminal_writestring("=====================================\n\n");
 
     // Инициализация управления памятью
@@ -1578,7 +1771,10 @@ void kernel_main(void) {
 
     // Инициализация шелла
     command_clear();
-    terminal_writestring("Welcome to MyOS v0.6!\n");
+    enable_cursor(14, 15); // Повторно включаем курсор после очистки
+    terminal_writestring("Welcome to MyOS v0.7!\n");
+    terminal_writestring("Features: Enhanced keyboard, VGA cursor, Memory management, Virtual memory\n");
+    terminal_writestring("New: Full keyboard support with Shift, Ctrl, Alt, Caps Lock\n");
     terminal_writestring("Type 'help' for available commands.\n\n");
     
     shell_ready = 1;
