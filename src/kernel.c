@@ -1,5 +1,3 @@
-// Полнофункциональное ядро с поддержкой клавиатуры и управления памятью
-
 typedef unsigned char  uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int   uint32_t;
@@ -44,6 +42,17 @@ typedef unsigned int   size_t;
 #define PAGE_DIRECTORY_ADDR  0x300000   // 3MB - Page Directory
 #define PAGE_TABLES_ADDR     0x301000   // 3MB+4KB - Page Tables
 
+// Файловая система
+#define FS_MAX_FILES        64          // Максимум файлов
+#define FS_MAX_FILENAME     32          // Максимум символов в имени файла
+#define FS_MAX_FILESIZE     1024        // Максимум байт в файле
+#define FS_BLOCK_SIZE       64          // Размер блока данных
+#define FS_MAX_BLOCKS       256         // Максимум блоков данных
+
+#define FS_INODE_FREE       0           // Свободный inode
+#define FS_INODE_FILE       1           // Обычный файл
+#define FS_INODE_DIR        2           // Директория (пока не используется)
+
 // IDT структуры
 struct idt_entry {
     uint16_t base_lo, sel;
@@ -78,6 +87,44 @@ typedef struct {
     page_table_entry_t entries[PAGE_ENTRIES];
 } page_table_t;
 
+// === СТРУКТУРЫ ФАЙЛОВОЙ СИСТЕМЫ ===
+
+// Суперблок файловой системы
+typedef struct {
+    uint32_t magic;              // Магическое число для проверки
+    uint32_t total_inodes;       // Общее количество inodes
+    uint32_t free_inodes;        // Свободные inodes
+    uint32_t total_blocks;       // Общее количество блоков данных
+    uint32_t free_blocks;        // Свободные блоки
+    uint32_t block_size;         // Размер блока данных
+} fs_superblock_t;
+
+// Индексный узел (inode) файла
+typedef struct {
+    uint8_t type;                        // Тип: свободный, файл, директория
+    char filename[FS_MAX_FILENAME];      // Имя файла
+    uint32_t size;                       // Размер файла в байтах
+    uint32_t blocks[16];                 // Прямые указатели на блоки данных
+    uint32_t created_time;               // Время создания (упрощенно)
+    uint32_t modified_time;              // Время модификации
+} fs_inode_t;
+
+// Запись директории (пока не используется, но структура готова)
+typedef struct {
+    uint32_t inode_number;               // Номер inode
+    char name[FS_MAX_FILENAME];          // Имя файла
+} fs_dir_entry_t;
+
+// Глобальное состояние файловой системы
+typedef struct {
+    fs_superblock_t superblock;          // Суперблок
+    fs_inode_t inodes[FS_MAX_FILES];     // Таблица inodes
+    uint8_t* data_blocks;                // Указатель на область данных
+    uint8_t inode_bitmap[FS_MAX_FILES];  // Битовая карта занятых inodes
+    uint8_t block_bitmap[FS_MAX_BLOCKS]; // Битовая карта занятых блоков
+    int initialized;                     // Флаг инициализации
+} fs_state_t;
+
 // Глобальные переменные
 struct idt_entry idt[256];
 struct idt_ptr idtp;
@@ -94,10 +141,24 @@ page_directory_t* page_directory = (page_directory_t*)PAGE_DIRECTORY_ADDR;
 page_table_t* page_tables = (page_table_t*)PAGE_TABLES_ADDR;
 int paging_enabled = 0;
 
+// Переменные файловой системы
+fs_state_t filesystem;
+uint32_t fs_time_counter = 0; // Простой счетчик времени
+
 // Предварительные объявления всех функций
 void terminal_writestring(const char* data);
 void terminal_putchar(char c);
 void print_number(uint32_t num);
+
+// Объявления функций файловой системы
+void init_filesystem(void);
+int fs_create_file(const char* filename);
+int fs_delete_file(const char* filename);
+int fs_write_file(const char* filename, const char* data, uint32_t size);
+int fs_read_file(const char* filename, char* buffer, uint32_t max_size);
+void fs_list_files(void);
+int fs_file_exists(const char* filename);
+fs_inode_t* fs_find_inode(const char* filename);
 
 // Функции для работы с виртуальной памятью (из interrupts.asm)
 extern void enable_paging(uint32_t page_directory_addr);
@@ -352,6 +413,321 @@ void handle_page_fault(void) {
     while(1) asm volatile("hlt");
 }
 
+// === ФУНКЦИИ ФАЙЛОВОЙ СИСТЕМЫ ===
+
+// Вспомогательная функция для копирования строк
+void fs_strcpy(char* dest, const char* src, int max_len) {
+    int i = 0;
+    while (i < max_len - 1 && src[i] != '\0') {
+        dest[i] = src[i];
+        i++;
+    }
+    dest[i] = '\0';
+}
+
+// Вспомогательная функция для сравнения строк
+int fs_strcmp(const char* str1, const char* str2) {
+    while (*str1 && (*str1 == *str2)) {
+        str1++;
+        str2++;
+    }
+    return *str1 - *str2;
+}
+
+// Инициализация файловой системы
+void init_filesystem(void) {
+    terminal_writestring("Initializing simple file system...\n");
+    
+    // Выделяем память для блоков данных
+    filesystem.data_blocks = (uint8_t*)kmalloc(FS_MAX_BLOCKS * FS_BLOCK_SIZE);
+    if (!filesystem.data_blocks) {
+        terminal_writestring("ERROR: Failed to allocate memory for filesystem!\n");
+        return;
+    }
+    
+    // Инициализация суперблока
+    filesystem.superblock.magic = 0xDEADBEEF;
+    filesystem.superblock.total_inodes = FS_MAX_FILES;
+    filesystem.superblock.free_inodes = FS_MAX_FILES;
+    filesystem.superblock.total_blocks = FS_MAX_BLOCKS;
+    filesystem.superblock.free_blocks = FS_MAX_BLOCKS;
+    filesystem.superblock.block_size = FS_BLOCK_SIZE;
+    
+    // Очищаем все inode-ы
+    for (int i = 0; i < FS_MAX_FILES; i++) {
+        filesystem.inodes[i].type = FS_INODE_FREE;
+        filesystem.inodes[i].filename[0] = '\0';
+        filesystem.inodes[i].size = 0;
+        filesystem.inodes[i].created_time = 0;
+        filesystem.inodes[i].modified_time = 0;
+        for (int j = 0; j < 16; j++) {
+            filesystem.inodes[i].blocks[j] = 0;
+        }
+        filesystem.inode_bitmap[i] = 0; // Свободен
+    }
+    
+    // Очищаем битовую карту блоков
+    for (int i = 0; i < FS_MAX_BLOCKS; i++) {
+        filesystem.block_bitmap[i] = 0; // Свободен
+    }
+    
+    // Очищаем область данных
+    for (int i = 0; i < FS_MAX_BLOCKS * FS_BLOCK_SIZE; i++) {
+        filesystem.data_blocks[i] = 0;
+    }
+    
+    filesystem.initialized = 1;
+    fs_time_counter = 1; // Начальное время
+    
+    terminal_writestring("File system initialized successfully!\n");
+}
+
+// Поиск свободного inode
+int fs_find_free_inode(void) {
+    for (int i = 0; i < FS_MAX_FILES; i++) {
+        if (filesystem.inodes[i].type == FS_INODE_FREE) {
+            return i;
+        }
+    }
+    return -1; // Нет свободных
+}
+
+// Поиск свободного блока данных
+int fs_find_free_block(void) {
+    for (int i = 0; i < FS_MAX_BLOCKS; i++) {
+        if (filesystem.block_bitmap[i] == 0) {
+            return i;
+        }
+    }
+    return -1; // Нет свободных
+}
+
+// Поиск файла по имени
+fs_inode_t* fs_find_inode(const char* filename) {
+    if (!filesystem.initialized) return NULL;
+    
+    for (int i = 0; i < FS_MAX_FILES; i++) {
+        if (filesystem.inodes[i].type == FS_INODE_FILE && 
+            fs_strcmp(filesystem.inodes[i].filename, filename) == 0) {
+            return &filesystem.inodes[i];
+        }
+    }
+    return NULL;
+}
+
+// Проверка существования файла
+int fs_file_exists(const char* filename) {
+    return fs_find_inode(filename) != NULL;
+}
+
+// Создание нового файла
+int fs_create_file(const char* filename) {
+    if (!filesystem.initialized) {
+        terminal_writestring("ERROR: File system not initialized!\n");
+        return -1;
+    }
+    
+    // Проверяем, не существует ли файл уже
+    if (fs_file_exists(filename)) {
+        terminal_writestring("ERROR: File already exists!\n");
+        return -1;
+    }
+    
+    // Ищем свободный inode
+    int inode_idx = fs_find_free_inode();
+    if (inode_idx == -1) {
+        terminal_writestring("ERROR: No free inodes available!\n");
+        return -1;
+    }
+    
+    // Инициализируем inode
+    fs_inode_t* inode = &filesystem.inodes[inode_idx];
+    inode->type = FS_INODE_FILE;
+    fs_strcpy(inode->filename, filename, FS_MAX_FILENAME);
+    inode->size = 0;
+    inode->created_time = fs_time_counter++;
+    inode->modified_time = inode->created_time;
+    
+    for (int i = 0; i < 16; i++) {
+        inode->blocks[i] = 0;
+    }
+    
+    // Помечаем inode как занятый
+    filesystem.inode_bitmap[inode_idx] = 1;
+    filesystem.superblock.free_inodes--;
+    
+    return inode_idx;
+}
+
+// Удаление файла
+int fs_delete_file(const char* filename) {
+    if (!filesystem.initialized) {
+        terminal_writestring("ERROR: File system not initialized!\n");
+        return -1;
+    }
+    
+    fs_inode_t* inode = fs_find_inode(filename);
+    if (!inode) {
+        terminal_writestring("ERROR: File not found!\n");
+        return -1;
+    }
+    
+    // Освобождаем все блоки данных файла
+    for (int i = 0; i < 16; i++) {
+        if (inode->blocks[i] != 0) {
+            filesystem.block_bitmap[inode->blocks[i]] = 0;
+            filesystem.superblock.free_blocks++;
+            inode->blocks[i] = 0;
+        }
+    }
+    
+    // Освобождаем inode
+    inode->type = FS_INODE_FREE;
+    inode->filename[0] = '\0';
+    inode->size = 0;
+    
+    // Находим индекс inode-а для освобождения битовой карты
+    int inode_idx = inode - filesystem.inodes;
+    filesystem.inode_bitmap[inode_idx] = 0;
+    filesystem.superblock.free_inodes++;
+    
+    return 0;
+}
+
+// Запись данных в файл
+int fs_write_file(const char* filename, const char* data, uint32_t size) {
+    if (!filesystem.initialized) {
+        terminal_writestring("ERROR: File system not initialized!\n");
+        return -1;
+    }
+    
+    if (size > FS_MAX_FILESIZE) {
+        terminal_writestring("ERROR: File too large!\n");
+        return -1;
+    }
+    
+    fs_inode_t* inode = fs_find_inode(filename);
+    if (!inode) {
+        terminal_writestring("ERROR: File not found!\n");
+        return -1;
+    }
+    
+    // Освобождаем старые блоки, если они есть
+    for (int i = 0; i < 16; i++) {
+        if (inode->blocks[i] != 0) {
+            filesystem.block_bitmap[inode->blocks[i]] = 0;
+            filesystem.superblock.free_blocks++;
+            inode->blocks[i] = 0;
+        }
+    }
+    
+    // Вычисляем необходимое количество блоков
+    uint32_t blocks_needed = (size + FS_BLOCK_SIZE - 1) / FS_BLOCK_SIZE;
+    if (blocks_needed > 16) {
+        terminal_writestring("ERROR: File requires too many blocks!\n");
+        return -1;
+    }
+    
+    // Выделяем новые блоки
+    for (uint32_t i = 0; i < blocks_needed; i++) {
+        int block_idx = fs_find_free_block();
+        if (block_idx == -1) {
+            terminal_writestring("ERROR: No free blocks available!\n");
+            return -1;
+        }
+        
+        inode->blocks[i] = block_idx;
+        filesystem.block_bitmap[block_idx] = 1;
+        filesystem.superblock.free_blocks--;
+    }
+    
+    // Записываем данные в блоки
+    uint32_t bytes_written = 0;
+    for (uint32_t i = 0; i < blocks_needed && bytes_written < size; i++) {
+        uint32_t bytes_to_write = (size - bytes_written > FS_BLOCK_SIZE) ? 
+                                  FS_BLOCK_SIZE : (size - bytes_written);
+        
+        uint8_t* block_ptr = &filesystem.data_blocks[inode->blocks[i] * FS_BLOCK_SIZE];
+        for (uint32_t j = 0; j < bytes_to_write; j++) {
+            block_ptr[j] = data[bytes_written + j];
+        }
+        
+        bytes_written += bytes_to_write;
+    }
+    
+    // Обновляем метаданные файла
+    inode->size = size;
+    inode->modified_time = fs_time_counter++;
+    
+    return 0;
+}
+
+// Чтение данных из файла
+int fs_read_file(const char* filename, char* buffer, uint32_t max_size) {
+    if (!filesystem.initialized) {
+        terminal_writestring("ERROR: File system not initialized!\n");
+        return -1;
+    }
+    
+    fs_inode_t* inode = fs_find_inode(filename);
+    if (!inode) {
+        terminal_writestring("ERROR: File not found!\n");
+        return -1;
+    }
+    
+    uint32_t bytes_to_read = (inode->size > max_size) ? max_size : inode->size;
+    uint32_t bytes_read = 0;
+    
+    // Читаем данные из блоков
+    for (int i = 0; i < 16 && bytes_read < bytes_to_read; i++) {
+        if (inode->blocks[i] == 0) break;
+        
+        uint32_t bytes_in_block = (bytes_to_read - bytes_read > FS_BLOCK_SIZE) ?
+                                  FS_BLOCK_SIZE : (bytes_to_read - bytes_read);
+        
+        uint8_t* block_ptr = &filesystem.data_blocks[inode->blocks[i] * FS_BLOCK_SIZE];
+        for (uint32_t j = 0; j < bytes_in_block; j++) {
+            buffer[bytes_read + j] = block_ptr[j];
+        }
+        
+        bytes_read += bytes_in_block;
+    }
+    
+    return bytes_read;
+}
+
+// Список всех файлов
+void fs_list_files(void) {
+    if (!filesystem.initialized) {
+        terminal_writestring("ERROR: File system not initialized!\n");
+        return;
+    }
+    
+    terminal_writestring("Files in filesystem:\n");
+    int file_count = 0;
+    
+    for (int i = 0; i < FS_MAX_FILES; i++) {
+        if (filesystem.inodes[i].type == FS_INODE_FILE) {
+            terminal_writestring("  ");
+            terminal_writestring(filesystem.inodes[i].filename);
+            terminal_writestring(" (");
+            print_number(filesystem.inodes[i].size);
+            terminal_writestring(" bytes)\n");
+            file_count++;
+        }
+    }
+    
+    if (file_count == 0) {
+        terminal_writestring("  (no files)\n");
+    }
+    
+    terminal_writestring("Total files: ");
+    print_number(file_count);
+    terminal_writestring(" / ");
+    print_number(FS_MAX_FILES);
+    terminal_writestring("\n");
+}
+
 // Управление курсором
 void update_cursor(int x, int y) {
     uint16_t pos = y * VGA_WIDTH + x;
@@ -517,12 +893,13 @@ void shell_prompt(void) {
 
 void command_clear(void) {
     terminal_clear();
-    terminal_writestring("MyOS Shell v1.1 with Memory Management\n");
-    terminal_writestring("=====================================\n\n");
+    terminal_writestring("MyOS Shell v1.2 with File System\n");
+    terminal_writestring("=================================\n\n");
 }
 
 void command_help(void) {
     terminal_writestring("Available commands:\n");
+    terminal_writestring("System:\n");
     terminal_writestring("  help     - Show this help message\n");
     terminal_writestring("  clear    - Clear the screen\n");
     terminal_writestring("  about    - Show system information\n");
@@ -532,13 +909,20 @@ void command_help(void) {
     terminal_writestring("  paging   - Enable/disable paging\n");
     terminal_writestring("  reboot   - Restart the system\n");
     terminal_writestring("  poweroff - Shutdown the system\n");
+    terminal_writestring("Files:\n");
+    terminal_writestring("  ls       - List files\n");
+    terminal_writestring("  touch    - Create empty file\n");
+    terminal_writestring("  cat      - Show file content\n");
+    terminal_writestring("  rm       - Delete file\n");
+    terminal_writestring("  echo     - Write text to file\n");
     terminal_writestring("\n");
 }
 
 void command_about(void) {
-    terminal_writestring("MyOS - Simple Operating System\n");
-    terminal_writestring("Version: 0.4 (with Virtual Memory)\n");
-    terminal_writestring("Features: Keyboard, Shell, Memory & Virtual Memory\n");
+    terminal_writestring("MyOS\n");
+    terminal_writestring("Version: 0.5\n");
+    terminal_writestring("New features of the version: Simple file system!\n");
+    terminal_writestring("Features: Keyboard, Shell, Memory, Virtual Memory, Files\n");
     terminal_writestring("Written in: C and Assembly\n");
     terminal_writestring("Written by: Kavoshnik\n");
     terminal_writestring("\n");
@@ -674,6 +1058,127 @@ void command_paging(void) {
     terminal_writestring("\n");
 }
 
+// === КОМАНДЫ ФАЙЛОВОЙ СИСТЕМЫ ===
+
+void command_ls(void) {
+    fs_list_files();
+}
+
+void command_touch(const char* filename) {
+    if (filename == NULL || filename[0] == '\0') {
+        terminal_writestring("Usage: touch <filename>\n");
+        return;
+    }
+    
+    if (fs_create_file(filename) >= 0) {
+        terminal_writestring("File created: ");
+        terminal_writestring(filename);
+        terminal_writestring("\n");
+    }
+}
+
+void command_cat(const char* filename) {
+    if (filename == NULL || filename[0] == '\0') {
+        terminal_writestring("Usage: cat <filename>\n");
+        return;
+    }
+    
+    char buffer[FS_MAX_FILESIZE + 1];
+    int bytes_read = fs_read_file(filename, buffer, FS_MAX_FILESIZE);
+    
+    if (bytes_read >= 0) {
+        buffer[bytes_read] = '\0'; // Null-terminate
+        terminal_writestring("Content of ");
+        terminal_writestring(filename);
+        terminal_writestring(":\n");
+        terminal_writestring(buffer);
+        if (bytes_read > 0 && buffer[bytes_read-1] != '\n') {
+            terminal_writestring("\n");
+        }
+    }
+}
+
+void command_rm(const char* filename) {
+    if (filename == NULL || filename[0] == '\0') {
+        terminal_writestring("Usage: rm <filename>\n");
+        return;
+    }
+    
+    if (fs_delete_file(filename) == 0) {
+        terminal_writestring("File deleted: ");
+        terminal_writestring(filename);
+        terminal_writestring("\n");
+    }
+}
+
+void command_echo(const char* args) {
+    if (args == NULL || args[0] == '\0') {
+        terminal_writestring("Usage: echo <text> > <filename>\n");
+        terminal_writestring("Example: echo Hello World > myfile.txt\n");
+        return;
+    }
+    
+    // Простой парсинг команды echo "text" > filename
+    const char* text_start = args;
+    const char* redirect_pos = NULL;
+    
+    // Ищем символ '>'
+    for (const char* p = args; *p; p++) {
+        if (*p == '>') {
+            redirect_pos = p;
+            break;
+        }
+    }
+    
+    if (!redirect_pos) {
+        terminal_writestring("Error: Missing '>' redirection\n");
+        terminal_writestring("Usage: echo <text> > <filename>\n");
+        return;
+    }
+    
+    // Извлекаем текст (до '>')
+    char text[256];
+    int text_len = redirect_pos - text_start;
+    if (text_len >= 256) text_len = 255;
+    
+    // Копируем текст, убираем пробелы в конце
+    int i;
+    for (i = 0; i < text_len; i++) {
+        text[i] = text_start[i];
+    }
+    while (i > 0 && text[i-1] == ' ') i--; // Убираем пробелы в конце
+    text[i] = '\0';
+    
+    // Извлекаем имя файла (после '>')
+    const char* filename_start = redirect_pos + 1;
+    while (*filename_start == ' ') filename_start++; // Пропускаем пробелы
+    
+    char filename[FS_MAX_FILENAME];
+    for (i = 0; i < FS_MAX_FILENAME - 1 && filename_start[i] && filename_start[i] != ' '; i++) {
+        filename[i] = filename_start[i];
+    }
+    filename[i] = '\0';
+    
+    if (filename[0] == '\0') {
+        terminal_writestring("Error: Missing filename\n");
+        return;
+    }
+    
+    // Создаем файл если не существует
+    if (!fs_file_exists(filename)) {
+        if (fs_create_file(filename) < 0) {
+            return; // Ошибка уже выведена
+        }
+    }
+    
+    // Записываем данные
+    if (fs_write_file(filename, text, i) == 0) {
+        terminal_writestring("Text written to ");
+        terminal_writestring(filename);
+        terminal_writestring("\n");
+    }
+}
+
 // Простое сравнение строк
 int strcmp(const char* str1, const char* str2) {
     while (*str1 && (*str1 == *str2)) {
@@ -687,27 +1192,63 @@ void execute_command(const char* command) {
     if (strcmp(command, "") == 0) {
         // Пустая команда
         return;
-    } else if (strcmp(command, "help") == 0) {
+    } 
+    
+    // Парсим команду и аргументы
+    char cmd[64];
+    char args[256];
+    int i = 0, j = 0;
+    
+    // Извлекаем команду (до первого пробела)
+    while (command[i] && command[i] != ' ' && i < 63) {
+        cmd[i] = command[i];
+        i++;
+    }
+    cmd[i] = '\0';
+    
+    // Пропускаем пробелы
+    while (command[i] == ' ') i++;
+    
+    // Извлекаем аргументы
+    while (command[i] && j < 255) {
+        args[j] = command[i];
+        i++;
+        j++;
+    }
+    args[j] = '\0';
+    
+    // Выполняем команды
+    if (strcmp(cmd, "help") == 0) {
         command_help();
-    } else if (strcmp(command, "clear") == 0) {
+    } else if (strcmp(cmd, "clear") == 0) {
         command_clear();
-    } else if (strcmp(command, "about") == 0) {
+    } else if (strcmp(cmd, "about") == 0) {
         command_about();
-    } else if (strcmp(command, "memory") == 0) {
+    } else if (strcmp(cmd, "memory") == 0) {
         command_memory();
-    } else if (strcmp(command, "memtest") == 0) {
+    } else if (strcmp(cmd, "memtest") == 0) {
         command_memtest();
-    } else if (strcmp(command, "vmem") == 0) {
+    } else if (strcmp(cmd, "vmem") == 0) {
         command_vmem();
-    } else if (strcmp(command, "paging") == 0) {
+    } else if (strcmp(cmd, "paging") == 0) {
         command_paging();
-    } else if (strcmp(command, "reboot") == 0) {
+    } else if (strcmp(cmd, "ls") == 0) {
+        command_ls();
+    } else if (strcmp(cmd, "touch") == 0) {
+        command_touch(args[0] ? args : NULL);
+    } else if (strcmp(cmd, "cat") == 0) {
+        command_cat(args[0] ? args : NULL);
+    } else if (strcmp(cmd, "rm") == 0) {
+        command_rm(args[0] ? args : NULL);
+    } else if (strcmp(cmd, "echo") == 0) {
+        command_echo(args[0] ? args : NULL);
+    } else if (strcmp(cmd, "reboot") == 0) {
         command_reboot();
-    } else if (strcmp(command, "poweroff") == 0) {
+    } else if (strcmp(cmd, "poweroff") == 0) {
         command_poweroff();
     } else {
         terminal_writestring("Unknown command: ");
-        terminal_writestring(command);
+        terminal_writestring(cmd);
         terminal_writestring("\n");
         terminal_writestring("Type 'help' for available commands.\n");
     }
@@ -754,8 +1295,8 @@ void keyboard_handler(void) {
 // Главная функция
 void kernel_main(void) {
     terminal_clear();
-    terminal_writestring("MyOS v0.3 with Memory Management!\n");
-    terminal_writestring("==================================\n\n");
+    terminal_writestring("MyOS v0.5!\n");
+    terminal_writestring("==========\n\n");
 
     // Инициализация управления памятью
     init_memory_management();
@@ -766,6 +1307,10 @@ void kernel_main(void) {
     init_virtual_memory();
     enable_virtual_memory();
     terminal_writestring("Virtual memory system ready\n");
+    
+    // Инициализация файловой системы
+    init_filesystem();
+    terminal_writestring("File system ready\n");
 
     // Настройка IDT
     idtp.limit = sizeof(idt) - 1;
@@ -796,7 +1341,7 @@ void kernel_main(void) {
 
     // Инициализация шелла
     command_clear();
-    terminal_writestring("Welcome to MyOS with Virtual Memory!\n");
+    terminal_writestring("Welcome to MyOS!\n");
     terminal_writestring("Type 'help' for available commands.\n");
     
     shell_ready = 1;
