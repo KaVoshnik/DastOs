@@ -1,8 +1,11 @@
-// Полнофункциональное ядро с поддержкой клавиатуры
+// Полнофункциональное ядро с поддержкой клавиатуры и управления памятью
 
 typedef unsigned char  uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int   uint32_t;
+typedef unsigned int   size_t;
+
+#define NULL ((void*)0)
 
 #define VGA_MEMORY 0xB8000
 #define VGA_WIDTH 80
@@ -14,6 +17,11 @@ typedef unsigned int   uint32_t;
 #define PIC2_COMMAND 0xA0
 #define PIC2_DATA 0xA1
 #define PIC_EOI 0x20
+
+// Управление памятью
+#define HEAP_START 0x400000    // Начало кучи (4 MB)
+#define HEAP_SIZE  0x100000    // Размер кучи (1 MB)
+#define BLOCK_SIZE sizeof(memory_block_t)
 
 // IDT структуры
 struct idt_entry {
@@ -27,10 +35,24 @@ struct idt_ptr {
     uint32_t base;
 } __attribute__((packed));
 
+// Структура блока памяти
+typedef struct memory_block {
+    size_t size;                    // Размер блока
+    int is_free;                    // Флаг: свободен ли блок
+    struct memory_block* next;      // Указатель на следующий блок
+    struct memory_block* prev;      // Указатель на предыдущий блок
+} memory_block_t;
+
 // Глобальные переменные
 struct idt_entry idt[256];
 struct idt_ptr idtp;
 int terminal_row = 0, terminal_column = 0;
+
+// Переменные управления памятью
+memory_block_t* heap_start = NULL;
+uint32_t total_memory = 0;
+uint32_t free_memory = 0;
+uint32_t used_memory = 0;
 
 // Scancode таблица
 const char scancode_to_ascii[128] = {
@@ -49,6 +71,113 @@ static inline uint8_t inb(uint16_t port) {
     uint8_t ret;
     asm volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
     return ret;
+}
+
+// Функции для работы с памятью
+void* memset(void* dest, int val, size_t len) {
+    uint8_t* ptr = (uint8_t*)dest;
+    while (len-- > 0) {
+        *ptr++ = val;
+    }
+    return dest;
+}
+
+void* memcpy(void* dest, const void* src, size_t len) {
+    uint8_t* d = (uint8_t*)dest;
+    const uint8_t* s = (const uint8_t*)src;
+    while (len-- > 0) {
+        *d++ = *s++;
+    }
+    return dest;
+}
+
+// Инициализация системы управления памятью
+void init_memory_management() {
+    heap_start = (memory_block_t*)HEAP_START;
+    heap_start->size = HEAP_SIZE - BLOCK_SIZE;
+    heap_start->is_free = 1;
+    heap_start->next = NULL;
+    heap_start->prev = NULL;
+    
+    total_memory = HEAP_SIZE;
+    free_memory = HEAP_SIZE - BLOCK_SIZE;
+    used_memory = BLOCK_SIZE;
+}
+
+// Выделение памяти (простой аллокатор)
+void* kmalloc(size_t size) {
+    if (size == 0) return NULL;
+    
+    // Выравниваем размер по границе 4 байта
+    size = (size + 3) & ~3;
+    
+    memory_block_t* current = heap_start;
+    
+    // Ищем подходящий свободный блок
+    while (current != NULL) {
+        if (current->is_free && current->size >= size) {
+            // Если блок намного больше нужного, разделяем его
+            if (current->size > size + BLOCK_SIZE + 16) {
+                memory_block_t* new_block = (memory_block_t*)((uint32_t)current + BLOCK_SIZE + size);
+                new_block->size = current->size - size - BLOCK_SIZE;
+                new_block->is_free = 1;
+                new_block->next = current->next;
+                new_block->prev = current;
+                
+                if (current->next) {
+                    current->next->prev = new_block;
+                }
+                current->next = new_block;
+                current->size = size;
+            }
+            
+            current->is_free = 0;
+            free_memory -= current->size;
+            used_memory += current->size;
+            
+            return (void*)((uint32_t)current + BLOCK_SIZE);
+        }
+        current = current->next;
+    }
+    
+    return NULL; // Память не найдена
+}
+
+// Освобождение памяти
+void kfree(void* ptr) {
+    if (ptr == NULL) return;
+    
+    memory_block_t* block = (memory_block_t*)((uint32_t)ptr - BLOCK_SIZE);
+    
+    if (block->is_free) return; // Уже освобожден
+    
+    block->is_free = 1;
+    free_memory += block->size;
+    used_memory -= block->size;
+    
+    // Объединяем смежные свободные блоки
+    if (block->next && block->next->is_free) {
+        block->size += block->next->size + BLOCK_SIZE;
+        if (block->next->next) {
+            block->next->next->prev = block;
+        }
+        block->next = block->next->next;
+    }
+    
+    if (block->prev && block->prev->is_free) {
+        block->prev->size += block->size + BLOCK_SIZE;
+        if (block->next) {
+            block->next->prev = block->prev;
+        }
+        block->prev->next = block->next;
+    }
+}
+
+// Получение информации о памяти
+void get_memory_info(uint32_t* total, uint32_t* free, uint32_t* used) {
+    *total = total_memory;
+    *free = free_memory;
+    *used = used_memory;
 }
 
 // Управление курсором
@@ -118,6 +247,27 @@ void terminal_putchar(char c) {
 
 void terminal_writestring(const char* data) {
     while (*data) terminal_putchar(*data++);
+}
+
+// Вывод чисел
+void print_number(uint32_t num) {
+    if (num == 0) {
+        terminal_putchar('0');
+        return;
+    }
+    
+    char buffer[12]; // Достаточно для 32-bit числа
+    int i = 0;
+    
+    while (num > 0) {
+        buffer[i++] = '0' + (num % 10);
+        num /= 10;
+    }
+    
+    // Выводим цифры в обратном порядке
+    while (--i >= 0) {
+        terminal_putchar(buffer[i]);
+    }
 }
 
 // IDT функции
@@ -195,26 +345,83 @@ void shell_prompt(void) {
 
 void command_clear(void) {
     terminal_clear();
-    terminal_writestring("MyOS Shell v1.0\n");
-    terminal_writestring("===============\n\n");
+    terminal_writestring("MyOS Shell v1.1 with Memory Management\n");
+    terminal_writestring("=====================================\n\n");
 }
 
 void command_help(void) {
     terminal_writestring("Available commands:\n");
-    terminal_writestring("  help    - Show this help message\n");
-    terminal_writestring("  clear   - Clear the screen\n");
-    terminal_writestring("  about   - Show system information\n");
-    terminal_writestring("  reboot  - Restart the system\n");
+    terminal_writestring("  help     - Show this help message\n");
+    terminal_writestring("  clear    - Clear the screen\n");
+    terminal_writestring("  about    - Show system information\n");
+    terminal_writestring("  memory   - Show memory usage\n");
+    terminal_writestring("  memtest  - Test memory allocation\n");
+    terminal_writestring("  reboot   - Restart the system\n");
     terminal_writestring("\n");
 }
 
 void command_about(void) {
     terminal_writestring("MyOS - Simple Operating System\n");
-    terminal_writestring("Version: 0.2\n");
-    terminal_writestring("Features: Keyboard input, Basic shell\n");
+    terminal_writestring("Version: 0.3 (with Memory Management)\n");
+    terminal_writestring("Features: Keyboard input, Shell, Memory management\n");
     terminal_writestring("Written in: C and Assembly\n");
-    terminal_writestring("Written by: Kavoshnik");
+    terminal_writestring("Written by: Kavoshnik\n");
     terminal_writestring("\n");
+}
+
+void command_memory(void) {
+    uint32_t total, free, used;
+    get_memory_info(&total, &free, &used);
+    
+    terminal_writestring("Memory Usage:\n");
+    terminal_writestring("  Total: ");
+    print_number(total);
+    terminal_writestring(" bytes\n");
+    terminal_writestring("  Used:  ");
+    print_number(used);
+    terminal_writestring(" bytes\n");
+    terminal_writestring("  Free:  ");
+    print_number(free);
+    terminal_writestring(" bytes\n\n");
+}
+
+void command_memtest(void) {
+    terminal_writestring("Memory allocation test:\n");
+    
+    // Тестируем выделение и освобождение памяти
+    void* ptr1 = kmalloc(100);
+    void* ptr2 = kmalloc(200);
+    void* ptr3 = kmalloc(50);
+    
+    terminal_writestring("Allocated 3 blocks (100, 200, 50 bytes)\n");
+    
+    if (ptr1) terminal_writestring("Block 1: OK\n");
+    else terminal_writestring("Block 1: FAILED\n");
+    
+    if (ptr2) terminal_writestring("Block 2: OK\n");
+    else terminal_writestring("Block 2: FAILED\n");
+    
+    if (ptr3) terminal_writestring("Block 3: OK\n");
+    else terminal_writestring("Block 3: FAILED\n");
+    
+    // Записываем данные в блоки
+    if (ptr1) {
+        char* data1 = (char*)ptr1;
+        for (int i = 0; i < 10; i++) {
+            data1[i] = 'A' + i;
+        }
+        terminal_writestring("Data written to block 1\n");
+    }
+    
+    // Освобождаем память
+    kfree(ptr2);
+    terminal_writestring("Block 2 freed\n");
+    
+    kfree(ptr1);
+    kfree(ptr3);
+    terminal_writestring("All blocks freed\n");
+    
+    terminal_writestring("Memory test completed!\n\n");
 }
 
 void command_reboot(void) {
@@ -243,6 +450,10 @@ void execute_command(const char* command) {
         command_clear();
     } else if (strcmp(command, "about") == 0) {
         command_about();
+    } else if (strcmp(command, "memory") == 0) {
+        command_memory();
+    } else if (strcmp(command, "memtest") == 0) {
+        command_memtest();
     } else if (strcmp(command, "reboot") == 0) {
         command_reboot();
     } else {
@@ -294,8 +505,12 @@ void keyboard_handler(void) {
 // Главная функция
 void kernel_main(void) {
     terminal_clear();
-    terminal_writestring("MyOS v0.2!\n");
-    terminal_writestring("==========\n\n");
+    terminal_writestring("MyOS v0.3 with Memory Management!\n");
+    terminal_writestring("==================================\n\n");
+
+    // Инициализация управления памятью
+    init_memory_management();
+    terminal_writestring("Memory management initialized\n");
 
     // Настройка IDT
     idtp.limit = sizeof(idt) - 1;
@@ -323,8 +538,10 @@ void kernel_main(void) {
 
     // Инициализация шелла
     command_clear();
-    terminal_writestring("Welcome to MyOS!\n");
-    terminal_writestring("Type 'help' for available commands.\n\n");
+    terminal_writestring("Welcome to MyOS with Memory Management!\n");
+    terminal_writestring("Type 'help' for available commands.\n");
+    terminal_writestring("Type 'memory' to see memory usage.\n");
+    terminal_writestring("Type 'memtest' to test memory allocation.\n\n");
     
     shell_ready = 1;
     shell_prompt();
