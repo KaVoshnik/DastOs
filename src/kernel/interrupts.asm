@@ -146,3 +146,80 @@ flush_tlb:
     mov eax, cr3
     mov cr3, eax
     ret
+
+; Обработчик таймера (IRQ0) для планировщика задач
+global timer_handler
+timer_handler:
+    ; Сохраняем все регистры
+    pusha
+    push ds
+    push es
+    push fs
+    push gs
+    
+    ; Устанавливаем сегменты ядра
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    
+    ; Вызываем планировщик
+    extern timer_interrupt_handler
+    call timer_interrupt_handler
+    
+    ; Восстанавливаем регистры
+    pop gs
+    pop fs
+    pop es
+    pop ds
+    popa
+    
+    iret
+
+; Обработчик системных вызовов (INT 0x80)
+global syscall_handler
+syscall_handler:
+    ; Сохраняем все регистры
+    pusha
+    push ds
+    push es
+    push fs
+    push gs
+    
+    ; Устанавливаем сегменты ядра
+    mov ax, 0x10        ; Селектор сегмента данных ядра
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    
+    ; Номер системного вызова в EAX
+    ; Аргументы в EBX, ECX, EDX, ESI, EDI
+    
+    ; Вызываем обработчик системных вызовов C
+    push edi            ; arg4
+    push esi            ; arg3
+    push edx            ; arg2
+    push ecx            ; arg1
+    push ebx            ; arg0
+    push eax            ; syscall_number
+    
+    extern handle_syscall
+    call handle_syscall
+    
+    ; Убираем аргументы из стека
+    add esp, 24
+    
+    ; Результат возвращается в EAX, сохраняем его
+    mov [esp + 28], eax ; Перезаписываем сохраненное значение EAX
+    
+    ; Восстанавливаем регистры
+    pop gs
+    pop fs
+    pop es
+    pop ds
+    popa
+    
+    ; Возвращаемся к пользовательскому коду
+    iret

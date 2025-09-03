@@ -17,12 +17,18 @@ LDFLAGS = -m elf_i386 -T $(SRC_DIR)/linker.ld
 BOOT_ASM = $(SRC_DIR)/boot/boot.asm
 INTERRUPTS_ASM = $(SRC_DIR)/kernel/interrupts.asm
 KERNEL_C = $(SRC_DIR)/kernel/kernel.c
+CONTEXT_ASM = $(SRC_DIR)/kernel/context.asm
+SYSCALLS_ASM = $(SRC_DIR)/kernel/syscalls.asm
+USER_MODE_ASM = $(SRC_DIR)/kernel/usermode.asm
 
 # Объектные файлы
 BOOT_OBJ = $(BUILD_DIR)/boot.o
 INTERRUPTS_OBJ = $(BUILD_DIR)/interrupts.o
 KERNEL_OBJ = $(BUILD_DIR)/kernel.o
-OBJECTS = $(BOOT_OBJ) $(INTERRUPTS_OBJ) $(KERNEL_OBJ)
+CONTEXT_OBJ = $(BUILD_DIR)/context.o
+SYSCALLS_OBJ = $(BUILD_DIR)/syscalls.o
+USER_MODE_OBJ = $(BUILD_DIR)/usermode.o
+OBJECTS = $(BOOT_OBJ) $(INTERRUPTS_OBJ) $(KERNEL_OBJ) $(CONTEXT_OBJ) $(SYSCALLS_OBJ) $(USER_MODE_OBJ)
 
 # Выходные файлы
 KERNEL_BIN = $(BUILD_DIR)/myos.bin
@@ -42,6 +48,15 @@ $(BOOT_OBJ): $(BOOT_ASM) | $(BUILD_DIR)
 $(INTERRUPTS_OBJ): $(INTERRUPTS_ASM) | $(BUILD_DIR)
 	$(AS) $(ASFLAGS) $(INTERRUPTS_ASM) -o $(INTERRUPTS_OBJ)
 
+$(CONTEXT_OBJ): $(CONTEXT_ASM) | $(BUILD_DIR)
+	$(AS) $(ASFLAGS) $(CONTEXT_ASM) -o $(CONTEXT_OBJ)
+
+$(SYSCALLS_OBJ): $(SYSCALLS_ASM) | $(BUILD_DIR)
+	$(AS) $(ASFLAGS) $(SYSCALLS_ASM) -o $(SYSCALLS_OBJ)
+
+$(USER_MODE_OBJ): $(USER_MODE_ASM) | $(BUILD_DIR)
+	$(AS) $(ASFLAGS) $(USER_MODE_ASM) -o $(USER_MODE_OBJ)
+
 $(KERNEL_OBJ): $(KERNEL_C) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(KERNEL_C) -o $(KERNEL_OBJ)
 
@@ -49,8 +64,14 @@ $(KERNEL_OBJ): $(KERNEL_C) | $(BUILD_DIR)
 $(KERNEL_BIN): $(OBJECTS)
 	$(LD) $(LDFLAGS) $(OBJECTS) -o $(KERNEL_BIN)
 
+# Создание конфигурации GRUB
+grub-config:
+	@echo 'menuentry "MyOS" {' > $(ISO_DIR)/boot/grub/grub.cfg
+	@echo '    multiboot /boot/myos.bin' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo '}' >> $(ISO_DIR)/boot/grub/grub.cfg
+
 # Создание ISO образа
-$(ISO_FILE): $(KERNEL_BIN)
+$(ISO_FILE): $(KERNEL_BIN) grub-config
 	cp $(KERNEL_BIN) $(ISO_DIR)/boot/myos.bin
 	grub-mkrescue -o $(ISO_FILE) $(ISO_DIR)
 
@@ -67,7 +88,7 @@ run-iso: $(ISO_FILE)
 
 # Запуск в QEMU с VNC (для удаленного доступа)
 run-vnc: $(ISO_FILE)
-	qemu-system-i386 -cdrom $(ISO_FILE) -vnc :1
+	qemu-system-i386 -cdrom $(ISO_FILE) -vnc :1 -daemonize
 
 # Очистка
 clean:
@@ -86,8 +107,11 @@ tree:
 	@echo "│   │   └── boot.asm          # Загрузчик с Multiboot заголовком"
 	@echo "│   ├── kernel/"
 	@echo "│   │   ├── kernel.c          # Основной код ядра"
-	@echo "│   │   └── interrupts.asm    # Обработчики прерываний"
-	@echo "│   ├── include/              # Заголовочные файлы (пусто)"
+	@echo "│   │   ├── interrupts.asm    # Обработчики прерываний"
+	@echo "│   │   ├── context.asm       # Переключение контекста задач"
+	@echo "│   │   ├── syscalls.asm      # Системные вызовы"
+	@echo "│   │   └── usermode.asm      # Поддержка пользовательского режима"
+	@echo "│   ├── include/              # Заголовочные файлы"
 	@echo "│   └── linker.ld             # Скрипт компоновщика"
 	@echo "├── build/                    # Директория сборки"
 	@echo "│   ├── *.o                   # Объектные файлы"
@@ -108,6 +132,9 @@ info:
 	@echo "  Boot:       $(BOOT_ASM)"
 	@echo "  Interrupts: $(INTERRUPTS_ASM)"
 	@echo "  Kernel:     $(KERNEL_C)"
+	@echo "  Context:    $(CONTEXT_ASM)"
+	@echo "  Syscalls:   $(SYSCALLS_ASM)"
+	@echo "  User Mode:  $(USER_MODE_ASM)"
 	@echo ""
 	@echo "Сборка:"
 	@echo "  Objects:    $(BUILD_DIR)/*.o"
@@ -119,6 +146,7 @@ info:
 	@echo "  make kernel    - Собрать только ядро"
 	@echo "  make run-iso   - Запустить ISO в QEMU"
 	@echo "  make run-bin   - Запустить ядро в QEMU"
+	@echo "  make run-vnc   - Запустить с VNC доступом"
 	@echo "  make clean     - Очистить сборку"
 	@echo "  make rebuild   - Пересобрать с нуля"
 	@echo "  make tree      - Показать структуру"
@@ -127,4 +155,4 @@ info:
 # Помощь
 help: info
 
-.PHONY: all kernel clean rebuild run-bin run-iso run-vnc tree info help
+.PHONY: all kernel clean rebuild run-bin run-iso run-vnc grub-config tree info help

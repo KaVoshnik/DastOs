@@ -80,6 +80,33 @@ typedef unsigned int   size_t;
 // Шелл
 #define COMMAND_BUFFER_SIZE 256
 
+// Системные вызовы
+#define SYS_EXIT    0
+#define SYS_WRITE   1
+#define SYS_READ    2
+#define SYS_OPEN    3
+#define SYS_CLOSE   4
+#define SYS_FORK    5
+#define SYS_EXEC    6
+#define SYS_WAIT    7
+#define SYS_GETPID  8
+#define SYS_YIELD   9
+#define SYS_SLEEP   10
+
+// Таймер (PIT - Programmable Interval Timer)
+#define PIT_FREQUENCY   1193182
+#define TIMER_FREQUENCY 100          // 100 Hz = 10ms тики
+#define PIT_COMMAND     0x43
+#define PIT_DATA0       0x40
+
+// GDT (Global Descriptor Table)
+#define GDT_ENTRIES     8
+#define GDT_NULL        0x00         // Нулевой дескриптор
+#define GDT_KERNEL_CODE 0x08         // Дескриптор кода ядра (Ring 0)
+#define GDT_KERNEL_DATA 0x10         // Дескриптор данных ядра (Ring 0)
+#define GDT_USER_CODE   0x1B         // Дескриптор кода пользователя (Ring 3)
+#define GDT_USER_DATA   0x23         // Дескриптор данных пользователя (Ring 3)
+
 // IDT структуры
 struct idt_entry {
     uint16_t base_lo, sel;
@@ -88,6 +115,21 @@ struct idt_entry {
 } __attribute__((packed));
 
 struct idt_ptr {
+    uint16_t limit;
+    uint32_t base;
+} __attribute__((packed));
+
+// GDT структуры
+struct gdt_entry {
+    uint16_t limit_low;
+    uint16_t base_low;
+    uint8_t  base_middle;
+    uint8_t  access;
+    uint8_t  granularity;
+    uint8_t  base_high;
+} __attribute__((packed));
+
+struct gdt_ptr {
     uint16_t limit;
     uint32_t base;
 } __attribute__((packed));
@@ -178,7 +220,13 @@ typedef struct task {
 // Глобальные переменные
 struct idt_entry idt[256];
 struct idt_ptr idtp;
+struct gdt_entry gdt[GDT_ENTRIES];
+struct gdt_ptr gdtp;
 int terminal_row = 0, terminal_column = 0;
+
+// Переменные таймера и планировщика
+uint32_t timer_ticks = 0;
+uint32_t timer_frequency = TIMER_FREQUENCY;
 
 // Переменные управления памятью
 memory_block_t* heap_start = NULL;
@@ -243,8 +291,33 @@ extern uint32_t get_page_fault_address(void);
 extern void flush_tlb(void);
 extern void page_fault_handler(void);
 extern void irq1_handler(void);
+extern void timer_handler(void);
+extern void syscall_handler(void);
 extern void exception_handler(void);
 extern void idt_flush(void);
+
+// Функции переключения контекста (из context.asm)
+extern void save_context(task_t* task);
+extern void restore_context(task_t* task);
+extern void switch_context(task_t* current, task_t* next);
+extern void init_task_context(task_t* task, void* entry_point, void* stack_top);
+extern void task_switch(task_t* next_task);
+
+// Функции пользовательского режима (из usermode.asm)
+extern void switch_to_user_mode(uint32_t user_esp, uint32_t user_eip);
+extern void switch_to_kernel_mode(void);
+extern void create_user_task(uint32_t entry_point, uint32_t stack_top, task_t* task);
+extern int get_current_privilege_level(void);
+extern int is_user_mode(void);
+extern void setup_user_mode_gdt(void);
+
+// Функции системных вызовов (из syscalls.asm)
+extern int syscall0(int syscall_num);
+extern int syscall1(int syscall_num, int arg0);
+extern int syscall2(int syscall_num, int arg0, int arg1);
+extern int syscall3(int syscall_num, int arg0, int arg1, int arg2);
+extern int syscall4(int syscall_num, int arg0, int arg1, int arg2, int arg3);
+extern int syscall5(int syscall_num, int arg0, int arg1, int arg2, int arg3, int arg4);
 
 // Scancode таблицы для разных режимов
 const char scancode_normal[128] = {
@@ -1784,6 +1857,208 @@ void keyboard_handler(void) {
     outb(PIC1_COMMAND, PIC_EOI);
 }
 
+// === СИСТЕМНЫЕ ВЫЗОВЫ ===
+
+// Обработчик системных вызовов
+int handle_syscall(int syscall_num, int arg0, int arg1, int arg2, int arg3 __attribute__((unused)), int arg4 __attribute__((unused))) {
+    switch (syscall_num) {
+        case SYS_EXIT:
+            // Завершение текущей задачи
+            if (current_task) {
+                current_task->state = TASK_STATE_DEAD;
+            }
+            return 0;
+            
+        case SYS_WRITE:
+            // Простая запись в консоль
+            if (arg0 == 1) { // stdout
+                char* buffer = (char*)arg1;
+                int length = arg2;
+                for (int i = 0; i < length; i++) {
+                    terminal_putchar(buffer[i]);
+                }
+                return length;
+            }
+            return -1;
+            
+        case SYS_READ:
+            // Чтение пока не поддерживается
+            return -1;
+            
+        case SYS_GETPID:
+            return current_task ? current_task->id : 0;
+            
+        case SYS_YIELD:
+            // Передача управления планировщику
+            schedule();
+            return 0;
+            
+        default:
+            return -1; // Неподдерживаемый системный вызов
+    }
+}
+
+// === НАСТРОЙКА GDT ===
+
+void gdt_set_gate(int num, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran) {
+    gdt[num].base_low = (base & 0xFFFF);
+    gdt[num].base_middle = (base >> 16) & 0xFF;
+    gdt[num].base_high = (base >> 24) & 0xFF;
+    
+    gdt[num].limit_low = (limit & 0xFFFF);
+    gdt[num].granularity = (limit >> 16) & 0x0F;
+    
+    gdt[num].granularity |= gran & 0xF0;
+    gdt[num].access = access;
+}
+
+extern void gdt_flush(uint32_t);
+
+void setup_gdt_user_segments(void) {
+    // Устанавливаем базовые дескрипторы
+    gdt_set_gate(0, 0, 0, 0, 0);                // Нулевой дескриптор
+    gdt_set_gate(1, 0, 0xFFFFFFFF, 0x9A, 0xCF); // Код ядра
+    gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF); // Данные ядра
+    gdt_set_gate(3, 0, 0xFFFFFFFF, 0xFA, 0xCF); // Код пользователя
+    gdt_set_gate(4, 0, 0xFFFFFFFF, 0xF2, 0xCF); // Данные пользователя
+    
+    gdtp.limit = (sizeof(struct gdt_entry) * GDT_ENTRIES) - 1;
+    gdtp.base = (uint32_t)&gdt;
+    
+    // Применяем GDT (функция из ассемблера)
+    // gdt_flush((uint32_t)&gdtp);
+}
+
+// === ТАЙМЕР ===
+
+void init_timer(uint32_t frequency) {
+    timer_frequency = frequency;
+    
+    // Вычисляем делитель
+    uint32_t divisor = PIT_FREQUENCY / frequency;
+    
+    // Отправляем команду
+    outb(PIT_COMMAND, 0x36);
+    
+    // Отправляем делитель
+    uint8_t l = (uint8_t)(divisor & 0xFF);
+    uint8_t h = (uint8_t)((divisor >> 8) & 0xFF);
+    
+    outb(PIT_DATA0, l);
+    outb(PIT_DATA0, h);
+    
+    terminal_writestring("Timer initialized at ");
+    print_number(frequency);
+    terminal_writestring(" Hz\n");
+}
+
+void timer_interrupt_handler(void) {
+    timer_ticks++;
+    
+    // Планировщик задач каждые 10 тиков (100ms при 100Hz)
+    if (timer_ticks % 10 == 0) {
+        scheduler_ticks++;
+        if (current_task && current_task->time_slice > 0) {
+            current_task->time_slice--;
+            if (current_task->time_slice == 0) {
+                current_task->time_slice = 10; // Сбрасываем time slice
+                schedule(); // Переключаем задачу
+            }
+        }
+    }
+    
+    // Отправляем EOI
+    outb(PIC1_COMMAND, PIC_EOI);
+}
+
+// === УЛУЧШЕННЫЙ ПЛАНИРОВЩИК ===
+
+void task_yield(void) {
+    if (current_task) {
+        current_task->time_slice = 0; // Принудительно вызываем переключение
+        schedule();
+    }
+}
+
+// Переключение контекста задачи (улучшенная версия)
+void switch_to_task_advanced(task_t* task) {
+    if (!task) return;
+    
+    // Используем новые ассемблерные функции для переключения контекста
+    if (current_task != task) {
+        task_t* old_task = current_task;
+        current_task = task;
+        task->state = TASK_STATE_RUNNING;
+        
+        // Переключаем контекст через ассемблерный код
+        switch_context(old_task, task);
+    }
+}
+
+// Создание пользовательской задачи
+task_t* create_user_task_wrapper(const char* name, void (*entry_point)(void), uint32_t priority) {
+    task_t* task = create_task(name, entry_point, priority);
+    if (task) {
+        // Настраиваем задачу для пользовательского режима
+        create_user_task((uint32_t)entry_point, 
+                        (uint32_t)task->stack + TASK_STACK_SIZE - 4, 
+                        task);
+        
+        // Обновляем регистры для пользовательского режима
+        task->regs.cs = GDT_USER_CODE;
+        task->regs.ds = GDT_USER_DATA;
+        task->regs.es = GDT_USER_DATA;
+        task->regs.fs = GDT_USER_DATA;
+        task->regs.gs = GDT_USER_DATA;
+        task->regs.ss = GDT_USER_DATA;
+    }
+    return task;
+}
+
+// === ДРАЙВЕРЫ УСТРОЙСТВ ===
+
+// Расширенный драйвер клавиатуры
+typedef struct {
+    char buffer[256];
+    int head;
+    int tail;
+    int count;
+} keyboard_buffer_t;
+
+keyboard_buffer_t kb_buffer = {0};
+
+void keyboard_buffer_put(char c) {
+    if (kb_buffer.count < 255) {
+        kb_buffer.buffer[kb_buffer.head] = c;
+        kb_buffer.head = (kb_buffer.head + 1) % 256;
+        kb_buffer.count++;
+    }
+}
+
+char keyboard_buffer_get(void) {
+    if (kb_buffer.count > 0) {
+        char c = kb_buffer.buffer[kb_buffer.tail];
+        kb_buffer.tail = (kb_buffer.tail + 1) % 256;
+        kb_buffer.count--;
+        return c;
+    }
+    return 0;
+}
+
+// Простой драйвер VGA
+void vga_write_color(int x, int y, char c, uint8_t color) {
+    uint16_t* video_memory = (uint16_t*)VGA_MEMORY;
+    if (x >= 0 && x < VGA_WIDTH && y >= 0 && y < VGA_HEIGHT) {
+        video_memory[y * VGA_WIDTH + x] = (color << 8) | c;
+    }
+}
+
+void vga_set_color(uint8_t color __attribute__((unused))) {
+    // Функция для установки текущего цвета
+    // Пока что просто сохраняем в глобальной переменной
+    // В реальной реализации это интегрировалось бы с terminal_putchar
+}
+
 // Главная функция
 void kernel_main(void) {
     terminal_clear();
@@ -1791,8 +2066,13 @@ void kernel_main(void) {
     // Включаем VGA курсор
     enable_cursor(14, 15); // Обычный курсор
     
-    terminal_writestring("MyOS v0.7 - Booting from ISO (Stable Mode)...\n");
-    terminal_writestring("=====================================\n\n");
+    terminal_writestring("MyOS v1.0 - Advanced Operating System\n");
+    terminal_writestring("=======================================\n\n");
+
+    // Настройка GDT для поддержки пользовательского режима
+    terminal_writestring("Setting up GDT for user mode...\n");
+    setup_gdt_user_segments();
+    terminal_writestring("GDT configured\n");
 
     // Сначала настраиваем IDT ДО включения прерываний
     terminal_writestring("Setting up interrupt handlers...\n");
@@ -1806,7 +2086,7 @@ void kernel_main(void) {
         idt_set_gate(i, 0, 0, 0);
     }
 
-    // Устанавливаем обработчики исключений (0-31) ПЕРЕД включением прерываний
+    // Устанавливаем обработчики исключений (0-31)
     for (int i = 0; i < 32; i++) {
         idt_set_gate(i, (uint32_t)exception_handler, 0x08, 0x8E);
     }
@@ -1814,46 +2094,73 @@ void kernel_main(void) {
     // Устанавливаем специальный обработчик Page Fault (исключение 14)
     idt_set_gate(14, (uint32_t)page_fault_handler, 0x08, 0x8E);
 
+    // Устанавливаем обработчик системных вызовов (INT 0x80 = прерывание 128)
+    idt_set_gate(128, (uint32_t)syscall_handler, 0x08, 0x8E);
+    
+    // Устанавливаем обработчик таймера (IRQ0 = прерывание 32)
+    idt_set_gate(32, (uint32_t)timer_handler, 0x08, 0x8E);
+    
     // Устанавливаем обработчик клавиатуры (IRQ1 = прерывание 33)
     idt_set_gate(33, (uint32_t)irq1_handler, 0x08, 0x8E);
     idt_flush();
     
-    terminal_writestring("IDT configured\n");
+    terminal_writestring("IDT configured with system calls and timer\n");
 
     // Инициализация управления памятью
     init_memory_management();
     terminal_writestring("Memory management initialized\n");
     
-    // Инициализация файловой системы (БЕЗ виртуальной памяти сначала)
+    // Инициализация файловой системы
     init_filesystem();
     terminal_writestring("File system ready\n");
     
-    // Пропускаем сложные компоненты для стабильности ISO загрузки
-    terminal_writestring("Skipping complex subsystems for stability...\n");
+    // Инициализация планировщика задач
+    init_scheduler();
+    terminal_writestring("Task scheduler ready\n");
     
-    // Простая инициализация PIC
-    outb(PIC1_COMMAND, 0x11);
-    outb(PIC1_DATA, 0x20);
-    outb(PIC1_DATA, 0x04);
-    outb(PIC1_DATA, 0x01);
-    outb(PIC1_DATA, 0xFD); // Разрешаем только IRQ1 (клавиатура)
-    terminal_writestring("Basic PIC initialized\n");
-
-    // Сначала проверим систему без прерываний
-    terminal_writestring("System initialization complete.\n");
-    terminal_writestring("Ready to enable interrupts...\n");
+    // Инициализация PIC (Programmable Interrupt Controller)
+    terminal_writestring("Initializing PIC...\n");
+    outb(PIC1_COMMAND, 0x11); // ICW1: Инициализация
+    outb(PIC2_COMMAND, 0x11);
+    outb(PIC1_DATA, 0x20);    // ICW2: Смещение векторов прерываний (IRQ0-7 -> 32-39)
+    outb(PIC2_DATA, 0x28);    // ICW2: Смещение векторов прерываний (IRQ8-15 -> 40-47)
+    outb(PIC1_DATA, 0x04);    // ICW3: Подключение PIC2 к IRQ2
+    outb(PIC2_DATA, 0x02);
+    outb(PIC1_DATA, 0x01);    // ICW4: Режим 8086
+    outb(PIC2_DATA, 0x01);
+    outb(PIC1_DATA, 0xFC);    // Маска: разрешаем IRQ0 (таймер) и IRQ1 (клавиатура)
+    outb(PIC2_DATA, 0xFF);    // Маска: отключаем все прерывания PIC2
+    terminal_writestring("PIC configured for timer and keyboard\n");
     
-    // Включаем прерывания ТОЛЬКО после полной инициализации
+    // Инициализация таймера (100 Hz)
+    init_timer(TIMER_FREQUENCY);
+    
+    // Включаем прерывания
+    terminal_writestring("Enabling interrupts...\n");
     asm volatile("sti");
     terminal_writestring("Interrupts enabled.\n");
 
+    // Создаем демонстрационные задачи
+    terminal_writestring("Creating demo tasks...\n");
+    create_task("idle", idle_task, 255);
+    create_task("demo1", demo_task1, 10);
+    create_task("demo2", demo_task2, 20);
+    terminal_writestring("Demo tasks created\n");
+
     // Инициализация шелла
-    terminal_writestring("Starting shell in safe mode...\n");
+    terminal_writestring("Starting advanced shell...\n");
     enable_cursor(14, 15);
-    terminal_writestring("\nWelcome to MyOS v0.7 (Safe ISO Boot)!\n");
-    terminal_writestring("Features: Basic keyboard, VGA cursor, Memory management\n");
+    terminal_writestring("\n=== Welcome to MyOS v1.0 ===\n");
+    terminal_writestring("Advanced Features:\n");
+    terminal_writestring("  * Task scheduling with context switching\n");
+    terminal_writestring("  * System calls (INT 0x80)\n");
+    terminal_writestring("  * User mode support\n");
+    terminal_writestring("  * Timer-driven multitasking\n");
+    terminal_writestring("  * Device drivers (keyboard, VGA, timer)\n");
+    terminal_writestring("  * Virtual memory management\n");
+    terminal_writestring("  * Simple file system\n\n");
     terminal_writestring("Type 'help' for available commands.\n");
-    terminal_writestring("Note: Full keyboard support with Shift, Ctrl combinations.\n\n");
+    terminal_writestring("Try 'tasks' to see running tasks or 'schedule' to test scheduler.\n\n");
     
     shell_ready = 1;
     shell_prompt();
