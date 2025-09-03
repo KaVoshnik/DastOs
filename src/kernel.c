@@ -133,6 +133,12 @@ extern void idt_flush(void);
 extern void irq1_handler(void);
 extern void exception_handler(void);
 
+// Шелл - буфер команд и состояние
+#define COMMAND_BUFFER_SIZE 256
+char command_buffer[COMMAND_BUFFER_SIZE];
+int command_length = 0;
+int shell_ready = 0;
+
 void handle_exception(void) {
     terminal_writestring("EXCEPTION OCCURRED! System halted.\n");
     while(1) asm volatile("hlt");
@@ -182,15 +188,102 @@ void initialize_system(void) {
     outb(0xA1, 0xFF); // Маска: все заблокированы на подчиненном PIC
 }
 
-// Обработчик клавиатуры
+// Функции шелла
+void shell_prompt(void) {
+    terminal_writestring("MyOS> ");
+}
+
+void command_clear(void) {
+    terminal_clear();
+    terminal_writestring("MyOS Shell v1.0\n");
+    terminal_writestring("===============\n\n");
+}
+
+void command_help(void) {
+    terminal_writestring("Available commands:\n");
+    terminal_writestring("  help    - Show this help message\n");
+    terminal_writestring("  clear   - Clear the screen\n");
+    terminal_writestring("  about   - Show system information\n");
+    terminal_writestring("  reboot  - Restart the system\n");
+    terminal_writestring("\n");
+}
+
+void command_about(void) {
+    terminal_writestring("MyOS - Simple Operating System\n");
+    terminal_writestring("Version: 0.2\n");
+    terminal_writestring("Features: Keyboard input, Basic shell\n");
+    terminal_writestring("Written in: C and Assembly\n");
+    terminal_writestring("Written by: Kavoshnik")
+    terminal_writestring("\n");
+}
+
+void command_reboot(void) {
+    terminal_writestring("Rebooting system...\n");
+    // Простая перезагрузка через клавиатурный контроллер
+    outb(0x64, 0xFE);
+    while(1) asm volatile("hlt");
+}
+
+// Простое сравнение строк
+int strcmp(const char* str1, const char* str2) {
+    while (*str1 && (*str1 == *str2)) {
+        str1++;
+        str2++;
+    }
+    return *str1 - *str2;
+}
+
+void execute_command(const char* command) {
+    if (strcmp(command, "") == 0) {
+        // Пустая команда
+        return;
+    } else if (strcmp(command, "help") == 0) {
+        command_help();
+    } else if (strcmp(command, "clear") == 0) {
+        command_clear();
+    } else if (strcmp(command, "about") == 0) {
+        command_about();
+    } else if (strcmp(command, "reboot") == 0) {
+        command_reboot();
+    } else {
+        terminal_writestring("Unknown command: ");
+        terminal_writestring(command);
+        terminal_writestring("\n");
+        terminal_writestring("Type 'help' for available commands.\n");
+    }
+}
+
+// Обработчик клавиатуры с поддержкой шелла
 void keyboard_handler(void) {
     uint8_t scancode = inb(KEYBOARD_DATA_PORT);
     
     // Проверяем, что это нажатие клавиши (не отпускание)
     if (!(scancode & 0x80) && scancode < 128) {
         char ascii = scancode_to_ascii[scancode];
+        
         if (ascii) {
-            terminal_putchar(ascii);
+            if (ascii == '\n' || ascii == '\r') { // Enter
+                terminal_putchar('\n');
+                if (shell_ready) {
+                    command_buffer[command_length] = '\0';
+                    execute_command(command_buffer);
+                    command_length = 0;
+                    shell_prompt();
+                }
+            } else if (ascii == '\b') { // Backspace
+                if (command_length > 0) {
+                    command_length--;
+                    // Простая реализация backspace - стираем символ
+                    terminal_putchar('\b');
+                    terminal_putchar(' ');
+                    terminal_putchar('\b');
+                }
+            } else if (ascii >= 32 && ascii <= 126) { // Печатные символы
+                if (command_length < COMMAND_BUFFER_SIZE - 1) {
+                    command_buffer[command_length++] = ascii;
+                    terminal_putchar(ascii);
+                }
+            }
         }
     }
     
@@ -201,8 +294,8 @@ void keyboard_handler(void) {
 // Главная функция
 void kernel_main(void) {
     terminal_clear();
-    terminal_writestring("MyOS v1.0 - Interrupts & Keyboard Ready!\n");
-    terminal_writestring("=========================================\n\n");
+    terminal_writestring("MyOS v0.2!\n");
+    terminal_writestring("==========\n\n");
 
     // Настройка IDT
     idtp.limit = sizeof(idt) - 1;
@@ -228,8 +321,13 @@ void kernel_main(void) {
     // Включаем прерывания
     asm volatile("sti");
 
-    terminal_writestring("System initialized successfully!\n");
-    terminal_writestring("Type on keyboard: ");
+    // Инициализация шелла
+    command_clear();
+    terminal_writestring("Welcome to MyOS!\n");
+    terminal_writestring("Type 'help' for available commands.\n\n");
+    
+    shell_ready = 1;
+    shell_prompt();
 
     while (1) asm volatile("hlt");
 }
