@@ -32,5 +32,4 @@ rm -rf iso src/*.o
 echo -e "${GREEN}✓ ISO created successfully${NC}"
 
 echo -e "${GREEN}=== Build Complete! ===${NC}"
-echo -e "${GREEN}To run: qemu-system-i386 -cdrom myos.iso${NC}"
-echo -e "${GREEN}   or:  qemu-system-i386 -kernel myos.bin${NC}"
+echo -e "${GREEN}To run:  qemu-system-i386 -kernel myos.bin${NC}"
