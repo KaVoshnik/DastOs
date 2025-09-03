@@ -53,6 +53,18 @@ typedef unsigned int   size_t;
 #define FS_INODE_FILE       1           // Обычный файл
 #define FS_INODE_DIR        2           // Директория (пока не используется)
 
+// Планировщик задач
+#define MAX_TASKS           8           // Максимум задач
+#define TASK_STACK_SIZE     4096        // Размер стека для каждой задачи
+
+#define TASK_STATE_RUNNING  0           // Выполняется
+#define TASK_STATE_READY    1           // Готова к выполнению
+#define TASK_STATE_BLOCKED  2           // Заблокирована
+#define TASK_STATE_DEAD     3           // Завершена
+
+// Шелл
+#define COMMAND_BUFFER_SIZE 256
+
 // IDT структуры
 struct idt_entry {
     uint16_t base_lo, sel;
@@ -125,6 +137,29 @@ typedef struct {
     int initialized;                     // Флаг инициализации
 } fs_state_t;
 
+// === СТРУКТУРЫ ПЛАНИРОВЩИКА ЗАДАЧ ===
+
+// Состояние регистров для переключения контекста
+typedef struct {
+    uint32_t eax, ebx, ecx, edx;
+    uint32_t esi, edi, esp, ebp;
+    uint32_t eip, eflags;
+    uint16_t cs, ds, es, fs, gs, ss;
+} registers_t;
+
+// Структура задачи
+typedef struct task {
+    uint32_t id;                         // ID задачи
+    char name[32];                       // Имя задачи
+    uint32_t state;                      // Состояние задачи
+    uint32_t priority;                   // Приоритет (0-высший, 255-низший)
+    registers_t regs;                    // Сохраненные регистры
+    uint32_t* stack;                     // Стек задачи
+    uint32_t stack_size;                 // Размер стека
+    uint32_t time_slice;                 // Оставшееся время выполнения
+    struct task* next;                   // Следующая задача в списке
+} task_t;
+
 // Глобальные переменные
 struct idt_entry idt[256];
 struct idt_ptr idtp;
@@ -145,10 +180,23 @@ int paging_enabled = 0;
 fs_state_t filesystem;
 uint32_t fs_time_counter = 0; // Простой счетчик времени
 
+// Переменные планировщика
+task_t* current_task = NULL;
+task_t* task_list = NULL;
+uint32_t next_task_id = 1;
+uint32_t scheduler_ticks = 0;
+
+// Переменные шелла
+char command_buffer[COMMAND_BUFFER_SIZE];
+int command_length = 0;
+int shell_ready = 0;
+
 // Предварительные объявления всех функций
 void terminal_writestring(const char* data);
 void terminal_putchar(char c);
 void print_number(uint32_t num);
+void terminal_clear(void);
+void shell_prompt(void);
 
 // Объявления функций файловой системы
 void init_filesystem(void);
@@ -160,12 +208,22 @@ void fs_list_files(void);
 int fs_file_exists(const char* filename);
 fs_inode_t* fs_find_inode(const char* filename);
 
+// Объявления функций планировщика
+void init_scheduler(void);
+task_t* create_task(const char* name, void (*entry_point)(void), uint32_t priority);
+void schedule(void);
+void task_yield(void);
+void switch_to_task(task_t* task);
+
 // Функции для работы с виртуальной памятью (из interrupts.asm)
 extern void enable_paging(uint32_t page_directory_addr);
 extern void disable_paging(void);
 extern uint32_t get_page_fault_address(void);
 extern void flush_tlb(void);
 extern void page_fault_handler(void);
+extern void irq1_handler(void);
+extern void exception_handler(void);
+extern void idt_flush(void);
 
 // Scancode таблица
 const char scancode_to_ascii[128] = {
@@ -202,6 +260,95 @@ void* memcpy(void* dest, const void* src, size_t len) {
         *d++ = *s++;
     }
     return dest;
+}
+
+// Функции для работы со строками
+int strlen(const char* str) {
+    int len = 0;
+    while (str[len]) len++;
+    return len;
+}
+
+int strcmp(const char* str1, const char* str2) {
+    while (*str1 && (*str1 == *str2)) {
+        str1++;
+        str2++;
+    }
+    return *str1 - *str2;
+}
+
+void strcpy(char* dest, const char* src) {
+    while ((*dest++ = *src++));
+}
+
+// === ФУНКЦИИ ТЕРМИНАЛА ===
+
+void terminal_clear(void) {
+    uint16_t* video_memory = (uint16_t*)VGA_MEMORY;
+    for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
+        video_memory[i] = 0x0720; // Пробел с белым текстом на черном фоне
+    }
+    terminal_row = 0;
+    terminal_column = 0;
+}
+
+void terminal_putchar(char c) {
+    uint16_t* video_memory = (uint16_t*)VGA_MEMORY;
+    
+    if (c == '\n') {
+        terminal_row++;
+        terminal_column = 0;
+    } else if (c == '\b') {
+        if (terminal_column > 0) {
+            terminal_column--;
+            video_memory[terminal_row * VGA_WIDTH + terminal_column] = 0x0720;
+        }
+        return;
+    } else {
+        video_memory[terminal_row * VGA_WIDTH + terminal_column] = (0x07 << 8) | c;
+        terminal_column++;
+    }
+    
+    if (terminal_column >= VGA_WIDTH) {
+        terminal_column = 0;
+        terminal_row++;
+    }
+    
+    if (terminal_row >= VGA_HEIGHT) {
+        // Прокрутка экрана вверх
+        for (int i = 0; i < (VGA_HEIGHT - 1) * VGA_WIDTH; i++) {
+            video_memory[i] = video_memory[i + VGA_WIDTH];
+        }
+        for (int i = (VGA_HEIGHT - 1) * VGA_WIDTH; i < VGA_HEIGHT * VGA_WIDTH; i++) {
+            video_memory[i] = 0x0720;
+        }
+        terminal_row = VGA_HEIGHT - 1;
+    }
+}
+
+void terminal_writestring(const char* data) {
+    while (*data) {
+        terminal_putchar(*data++);
+    }
+}
+
+void print_number(uint32_t num) {
+    if (num == 0) {
+        terminal_putchar('0');
+        return;
+    }
+    
+    char buffer[12];
+    int i = 0;
+    
+    while (num > 0) {
+        buffer[i++] = '0' + (num % 10);
+        num /= 10;
+    }
+    
+    while (i > 0) {
+        terminal_putchar(buffer[--i]);
+    }
 }
 
 // Инициализация системы управления памятью
@@ -642,20 +789,20 @@ int fs_write_file(const char* filename, const char* data, uint32_t size) {
     }
     
     // Записываем данные в блоки
-    uint32_t bytes_written = 0;
-    for (uint32_t i = 0; i < blocks_needed && bytes_written < size; i++) {
-        uint32_t bytes_to_write = (size - bytes_written > FS_BLOCK_SIZE) ? 
-                                  FS_BLOCK_SIZE : (size - bytes_written);
+    for (uint32_t i = 0; i < blocks_needed; i++) {
+        uint32_t block_offset = inode->blocks[i] * FS_BLOCK_SIZE;
+        uint32_t data_offset = i * FS_BLOCK_SIZE;
+        uint32_t bytes_to_copy = FS_BLOCK_SIZE;
         
-        uint8_t* block_ptr = &filesystem.data_blocks[inode->blocks[i] * FS_BLOCK_SIZE];
-        for (uint32_t j = 0; j < bytes_to_write; j++) {
-            block_ptr[j] = data[bytes_written + j];
+        if (data_offset + bytes_to_copy > size) {
+            bytes_to_copy = size - data_offset;
         }
         
-        bytes_written += bytes_to_write;
+        for (uint32_t j = 0; j < bytes_to_copy; j++) {
+            filesystem.data_blocks[block_offset + j] = data[data_offset + j];
+        }
     }
     
-    // Обновляем метаданные файла
     inode->size = size;
     inode->modified_time = fs_time_counter++;
     
@@ -675,28 +822,33 @@ int fs_read_file(const char* filename, char* buffer, uint32_t max_size) {
         return -1;
     }
     
-    uint32_t bytes_to_read = (inode->size > max_size) ? max_size : inode->size;
-    uint32_t bytes_read = 0;
-    
-    // Читаем данные из блоков
-    for (int i = 0; i < 16 && bytes_read < bytes_to_read; i++) {
-        if (inode->blocks[i] == 0) break;
-        
-        uint32_t bytes_in_block = (bytes_to_read - bytes_read > FS_BLOCK_SIZE) ?
-                                  FS_BLOCK_SIZE : (bytes_to_read - bytes_read);
-        
-        uint8_t* block_ptr = &filesystem.data_blocks[inode->blocks[i] * FS_BLOCK_SIZE];
-        for (uint32_t j = 0; j < bytes_in_block; j++) {
-            buffer[bytes_read + j] = block_ptr[j];
-        }
-        
-        bytes_read += bytes_in_block;
+    uint32_t bytes_to_read = inode->size;
+    if (bytes_to_read > max_size) {
+        bytes_to_read = max_size;
     }
     
-    return bytes_read;
+    uint32_t blocks_to_read = (bytes_to_read + FS_BLOCK_SIZE - 1) / FS_BLOCK_SIZE;
+    
+    for (uint32_t i = 0; i < blocks_to_read; i++) {
+        if (inode->blocks[i] == 0) break;
+        
+        uint32_t block_offset = inode->blocks[i] * FS_BLOCK_SIZE;
+        uint32_t buffer_offset = i * FS_BLOCK_SIZE;
+        uint32_t bytes_to_copy = FS_BLOCK_SIZE;
+        
+        if (buffer_offset + bytes_to_copy > bytes_to_read) {
+            bytes_to_copy = bytes_to_read - buffer_offset;
+        }
+        
+        for (uint32_t j = 0; j < bytes_to_copy; j++) {
+            buffer[buffer_offset + j] = filesystem.data_blocks[block_offset + j];
+        }
+    }
+    
+    return bytes_to_read;
 }
 
-// Список всех файлов
+// Список файлов
 void fs_list_files(void) {
     if (!filesystem.initialized) {
         terminal_writestring("ERROR: File system not initialized!\n");
@@ -704,121 +856,181 @@ void fs_list_files(void) {
     }
     
     terminal_writestring("Files in filesystem:\n");
-    int file_count = 0;
+    terminal_writestring("Name               Size      Time\n");
+    terminal_writestring("----------------------------------\n");
     
+    int file_count = 0;
     for (int i = 0; i < FS_MAX_FILES; i++) {
         if (filesystem.inodes[i].type == FS_INODE_FILE) {
-            terminal_writestring("  ");
-            terminal_writestring(filesystem.inodes[i].filename);
-            terminal_writestring(" (");
-            print_number(filesystem.inodes[i].size);
-            terminal_writestring(" bytes)\n");
+            fs_inode_t* inode = &filesystem.inodes[i];
+            
+            // Имя файла
+            terminal_writestring(inode->filename);
+            
+            // Выравнивание
+            int name_len = strlen(inode->filename);
+            for (int j = name_len; j < 18; j++) {
+                terminal_putchar(' ');
+            }
+            
+            // Размер
+            print_number(inode->size);
+            terminal_writestring(" bytes   ");
+            
+            // Время
+            print_number(inode->modified_time);
+            terminal_putchar('\n');
+            
             file_count++;
         }
     }
     
     if (file_count == 0) {
-        terminal_writestring("  (no files)\n");
+        terminal_writestring("No files found.\n");
+    } else {
+        terminal_writestring("\nTotal files: ");
+        print_number(file_count);
+        terminal_putchar('\n');
     }
     
-    terminal_writestring("Total files: ");
-    print_number(file_count);
-    terminal_writestring(" / ");
-    print_number(FS_MAX_FILES);
-    terminal_writestring("\n");
+    terminal_writestring("Free inodes: ");
+    print_number(filesystem.superblock.free_inodes);
+    terminal_writestring(", Free blocks: ");
+    print_number(filesystem.superblock.free_blocks);
+    terminal_writestring("\n\n");
 }
 
-// Управление курсором
-void update_cursor(int x, int y) {
-    uint16_t pos = y * VGA_WIDTH + x;
-    outb(0x3D4, 0x0F);
-    outb(0x3D5, (uint8_t)(pos & 0xFF));
-    outb(0x3D4, 0x0E);
-    outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
+// === ФУНКЦИИ ПЛАНИРОВЩИКА ЗАДАЧ ===
+
+// Инициализация планировщика
+void init_scheduler(void) {
+    current_task = NULL;
+    task_list = NULL;
+    next_task_id = 1;
+    scheduler_ticks = 0;
+    terminal_writestring("Task scheduler initialized\n");
 }
 
-// Терминал
-void terminal_clear(void) {
-    uint16_t* video = (uint16_t*)VGA_MEMORY;
-    for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
-        video[i] = 0x0720; // Пробел с белым текстом
+// Создание новой задачи
+task_t* create_task(const char* name, void (*entry_point)(void), uint32_t priority) {
+    task_t* task = (task_t*)kmalloc(sizeof(task_t));
+    if (!task) {
+        terminal_writestring("ERROR: Failed to allocate memory for task!\n");
+        return NULL;
     }
-    terminal_row = terminal_column = 0;
-    update_cursor(terminal_column, terminal_row);
-}
-
-void terminal_putchar(char c) {
-    uint16_t* video = (uint16_t*)VGA_MEMORY;
-
-    if (c == '\n') {
-        terminal_column = 0;
-        if (++terminal_row >= VGA_HEIGHT) {
-            // Простая прокрутка экрана
-            for (int i = 0; i < (VGA_HEIGHT - 1) * VGA_WIDTH; i++) {
-                video[i] = video[i + VGA_WIDTH];
-            }
-            for (int i = (VGA_HEIGHT - 1) * VGA_WIDTH; i < VGA_HEIGHT * VGA_WIDTH; i++) {
-                video[i] = 0x0720;
-            }
-            terminal_row = VGA_HEIGHT - 1;
+    
+    // Выделяем стек для задачи
+    task->stack = (uint32_t*)kmalloc(TASK_STACK_SIZE);
+    if (!task->stack) {
+        kfree(task);
+        terminal_writestring("ERROR: Failed to allocate stack for task!\n");
+        return NULL;
+    }
+    
+    // Инициализируем структуру задачи
+    task->id = next_task_id++;
+    strcpy(task->name, name);
+    task->state = TASK_STATE_READY;
+    task->priority = priority;
+    task->stack_size = TASK_STACK_SIZE;
+    task->time_slice = 10; // 10 тиков
+    task->next = NULL;
+    
+    // Инициализируем регистры
+    memset(&task->regs, 0, sizeof(registers_t));
+    task->regs.eip = (uint32_t)entry_point;
+    task->regs.esp = (uint32_t)task->stack + TASK_STACK_SIZE - 4; // Вершина стека
+    task->regs.cs = 0x08;  // Селектор кода ядра
+    task->regs.ds = 0x10;  // Селектор данных ядра
+    task->regs.es = 0x10;
+    task->regs.fs = 0x10;
+    task->regs.gs = 0x10;
+    task->regs.ss = 0x10;
+    task->regs.eflags = 0x202; // Прерывания включены
+    
+    // Добавляем задачу в список
+    if (task_list == NULL) {
+        task_list = task;
+        current_task = task;
+    } else {
+        task_t* last = task_list;
+        while (last->next) {
+            last = last->next;
         }
-        update_cursor(terminal_column, terminal_row);
+        last->next = task;
+    }
+    
+    return task;
+}
+
+// Планировщик (простой round-robin)
+void schedule(void) {
+    if (!current_task || !current_task->next) {
         return;
     }
-
-    if (c == '\b' && terminal_column > 0) {
-        terminal_column--;
-        video[terminal_row * VGA_WIDTH + terminal_column] = 0x0720;
-        update_cursor(terminal_column, terminal_row);
-        return;
-    }
-
-    if (c >= 32 && c <= 126) { // Только печатные символы
-        video[terminal_row * VGA_WIDTH + terminal_column] = (0x07 << 8) | c;
-
-        if (++terminal_column >= VGA_WIDTH) {
-            terminal_column = 0;
-            if (++terminal_row >= VGA_HEIGHT) {
-                // Простая прокрутка экрана
-                for (int i = 0; i < (VGA_HEIGHT - 1) * VGA_WIDTH; i++) {
-                    video[i] = video[i + VGA_WIDTH];
-                }
-                for (int i = (VGA_HEIGHT - 1) * VGA_WIDTH; i < VGA_HEIGHT * VGA_WIDTH; i++) {
-                    video[i] = 0x0720;
-                }
-                terminal_row = VGA_HEIGHT - 1;
-            }
+    
+    // Находим следующую готовую задачу
+    task_t* next_task = current_task->next;
+    while (next_task && next_task->state != TASK_STATE_READY) {
+        next_task = next_task->next;
+        if (!next_task) {
+            next_task = task_list; // Возвращаемся к началу списка
+            break;
         }
-        update_cursor(terminal_column, terminal_row);
+    }
+    
+    if (next_task && next_task != current_task) {
+        task_t* prev_task = current_task;
+        current_task = next_task;
+        switch_to_task(current_task);
     }
 }
 
-void terminal_writestring(const char* data) {
-    while (*data) terminal_putchar(*data++);
+// Переключение контекста задачи (упрощенная версия)
+void switch_to_task(task_t* task) {
+    if (!task) return;
+    
+    // В реальной ОС здесь было бы переключение контекста
+    // Пока что просто выводим информацию
+    terminal_writestring("Switching to task: ");
+    terminal_writestring(task->name);
+    terminal_writestring(" (ID: ");
+    print_number(task->id);
+    terminal_writestring(")\n");
 }
 
-// Вывод чисел
-void print_number(uint32_t num) {
-    if (num == 0) {
-        terminal_putchar('0');
-        return;
-    }
-    
-    char buffer[12]; // Достаточно для 32-bit числа
-    int i = 0;
-    
-    while (num > 0) {
-        buffer[i++] = '0' + (num % 10);
-        num /= 10;
-    }
-    
-    // Выводим цифры в обратном порядке
-    while (--i >= 0) {
-        terminal_putchar(buffer[i]);
+// === ДЕМОНСТРАЦИОННЫЕ ЗАДАЧИ ===
+
+void idle_task(void) {
+    while (1) {
+        asm volatile("hlt"); // Ждем прерывания
     }
 }
 
-// IDT функции
+void demo_task1(void) {
+    for (int i = 0; i < 5; i++) {
+        terminal_writestring("Task 1 running... ");
+        print_number(i);
+        terminal_putchar('\n');
+        
+        // Имитация работы
+        for (volatile int j = 0; j < 1000000; j++);
+    }
+}
+
+void demo_task2(void) {
+    for (int i = 0; i < 3; i++) {
+        terminal_writestring("Task 2 executing... ");
+        print_number(i);
+        terminal_putchar('\n');
+        
+        // Имитация работы
+        for (volatile int j = 0; j < 500000; j++);
+    }
+}
+
+// === IDT И ОБРАБОТЧИКИ ПРЕРЫВАНИЙ ===
+
 void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
     idt[num].base_lo = base & 0xFFFF;
     idt[num].base_hi = (base >> 16) & 0xFFFF;
@@ -827,105 +1039,74 @@ void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
     idt[num].flags = flags;
 }
 
-extern void idt_flush(void);
-extern void irq1_handler(void);
-extern void exception_handler(void);
-
-// Шелл - буфер команд и состояние
-#define COMMAND_BUFFER_SIZE 256
-char command_buffer[COMMAND_BUFFER_SIZE];
-int command_length = 0;
-int shell_ready = 0;
-
 void handle_exception(void) {
-    terminal_writestring("EXCEPTION OCCURRED! System halted.\n");
+    terminal_writestring("EXCEPTION occurred! System halted.\n");
     while(1) asm volatile("hlt");
 }
 
-// Функция полной инициализации системы для совместимости с GRUB
+// Инициализация PIC
 void initialize_system(void) {
-    // ПОЛНОЕ отключение прерываний
-    asm volatile("cli");
+    terminal_writestring("Initializing system...\n");
     
-    // Сброс клавиатурного контроллера
-    // Ждем пока контроллер будет готов
-    while (inb(KEYBOARD_STATUS_PORT) & 0x02);
-    outb(0x64, 0xAD); // Отключаем клавиатуру
+    // Инициализация PIC (упрощенная)
+    outb(PIC1_COMMAND, 0x11);
+    outb(PIC2_COMMAND, 0x11);
+    outb(PIC1_DATA, 0x20);
+    outb(PIC2_DATA, 0x28);
+    outb(PIC1_DATA, 0x04);
+    outb(PIC2_DATA, 0x02);
+    outb(PIC1_DATA, 0x01);
+    outb(PIC2_DATA, 0x01);
+    outb(PIC1_DATA, 0xFD); // Разрешаем только IRQ1 (клавиатура)
+    outb(PIC2_DATA, 0xFF);
     
-    while (inb(KEYBOARD_STATUS_PORT) & 0x02);
-    outb(0x64, 0xA7); // Отключаем мышь
-    
-    // Очищаем буфер клавиатуры
-    while (inb(KEYBOARD_STATUS_PORT) & 0x01) {
-        inb(KEYBOARD_DATA_PORT);
-    }
-    
-    // ПОЛНЫЙ сброс PIC
-    // Маскируем все прерывания на время инициализации
-    outb(0x21, 0xFF);
-    outb(0xA1, 0xFF);
-    
-    // Инициализация главного PIC
-    outb(0x20, 0x11); // ICW1: Инициализация + требуется ICW4
-    outb(0x21, 0x20); // ICW2: Смещение прерываний на 0x20 (32)
-    outb(0x21, 0x04); // ICW3: Подчиненный PIC на IRQ2
-    outb(0x21, 0x01); // ICW4: Режим 8086
-    
-    // Инициализация подчиненного PIC
-    outb(0xA0, 0x11); // ICW1: Инициализация + требуется ICW4
-    outb(0xA1, 0x28); // ICW2: Смещение прерываний на 0x28 (40)
-    outb(0xA1, 0x02); // ICW3: Подключен к главному PIC через IRQ2
-    outb(0xA1, 0x01); // ICW4: Режим 8086
-    
-    // Включаем клавиатуру обратно
-    while (inb(KEYBOARD_STATUS_PORT) & 0x02);
-    outb(0x64, 0xAE); // Включаем клавиатуру
-    
-    // Включаем только клавиатурное прерывание
-    outb(0x21, 0xFD); // Маска: все заблокированы кроме IRQ1
-    outb(0xA1, 0xFF); // Маска: все заблокированы на подчиненном PIC
+    terminal_writestring("PIC initialized\n");
 }
 
-// Функции шелла
+// === КОМАНДЫ ШЕЛЛА ===
+
 void shell_prompt(void) {
-    terminal_writestring("MyOS> ");
-}
-
-void command_clear(void) {
-    terminal_clear();
-    terminal_writestring("MyOS Shell v1.2 with File System\n");
-    terminal_writestring("=================================\n\n");
+    terminal_writestring("myos> ");
 }
 
 void command_help(void) {
     terminal_writestring("Available commands:\n");
-    terminal_writestring("System:\n");
-    terminal_writestring("  help     - Show this help message\n");
-    terminal_writestring("  clear    - Clear the screen\n");
-    terminal_writestring("  about    - Show system information\n");
-    terminal_writestring("  memory   - Show memory usage\n");
-    terminal_writestring("  memtest  - Test memory allocation\n");
-    terminal_writestring("  vmem     - Show virtual memory status\n");
-    terminal_writestring("  paging   - Enable/disable paging\n");
-    terminal_writestring("  reboot   - Restart the system\n");
-    terminal_writestring("  poweroff - Shutdown the system\n");
-    terminal_writestring("Files:\n");
-    terminal_writestring("  ls       - List files\n");
-    terminal_writestring("  touch    - Create empty file\n");
-    terminal_writestring("  cat      - Show file content\n");
-    terminal_writestring("  rm       - Delete file\n");
-    terminal_writestring("  echo     - Write text to file\n");
+    terminal_writestring("  help       - Show this help\n");
+    terminal_writestring("  clear      - Clear screen\n");
+    terminal_writestring("  about      - System information\n");
+    terminal_writestring("  memory     - Memory usage\n");
+    terminal_writestring("  memtest    - Test memory allocator\n");
+    terminal_writestring("  vmem       - Virtual memory status\n");
+    terminal_writestring("  paging     - Enable/check paging\n");
+    terminal_writestring("  tasks      - List tasks\n");
+    terminal_writestring("  schedule   - Trigger scheduler\n");
+    terminal_writestring("  ls         - List files\n");
+    terminal_writestring("  touch <f>  - Create file\n");
+    terminal_writestring("  cat <f>    - Show file content\n");
+    terminal_writestring("  rm <f>     - Delete file\n");
+    terminal_writestring("  echo <t> > <f> - Write text to file\n");
+    terminal_writestring("  reboot     - Restart system\n");
+    terminal_writestring("  poweroff   - Shutdown system\n");
     terminal_writestring("\n");
 }
 
+void command_clear(void) {
+    terminal_clear();
+}
+
 void command_about(void) {
-    terminal_writestring("MyOS\n");
-    terminal_writestring("Version: 0.5\n");
-    terminal_writestring("New features of the version: Simple file system!\n");
-    terminal_writestring("Features: Keyboard, Shell, Memory, Virtual Memory, Files\n");
-    terminal_writestring("Written in: C and Assembly\n");
-    terminal_writestring("Written by: Kavoshnik\n");
-    terminal_writestring("\n");
+    terminal_writestring("MyOS v0.6 - Advanced Operating System\n");
+    terminal_writestring("================================\n");
+    terminal_writestring("Features:\n");
+    terminal_writestring("  - 32-bit protected mode\n");
+    terminal_writestring("  - Dynamic memory management\n");
+    terminal_writestring("  - Virtual memory with paging\n");
+    terminal_writestring("  - Simple file system\n");
+    terminal_writestring("  - Basic task scheduler\n");
+    terminal_writestring("  - Interrupt handling\n");
+    terminal_writestring("  - Command shell\n");
+    terminal_writestring("\nBuilt with Assembly and C\n");
+    terminal_writestring("For x86 architecture\n\n");
 }
 
 void command_memory(void) {
@@ -936,43 +1117,33 @@ void command_memory(void) {
     terminal_writestring("  Total: ");
     print_number(total);
     terminal_writestring(" bytes\n");
+    terminal_writestring("  Free:  ");
+    print_number(free);
+    terminal_writestring(" bytes\n");
     terminal_writestring("  Used:  ");
     print_number(used);
     terminal_writestring(" bytes\n");
-    terminal_writestring("  Free:  ");
-    print_number(free);
-    terminal_writestring(" bytes\n\n");
+    
+    // Процент использования
+    uint32_t percent = (used * 100) / total;
+    terminal_writestring("  Usage: ");
+    print_number(percent);
+    terminal_writestring("%\n\n");
 }
 
 void command_memtest(void) {
-    terminal_writestring("Memory allocation test:\n");
+    terminal_writestring("Testing memory allocator...\n");
     
-    // Тестируем выделение и освобождение памяти
-    void* ptr1 = kmalloc(100);
-    void* ptr2 = kmalloc(200);
-    void* ptr3 = kmalloc(50);
+    // Тест 1: выделение и освобождение
+    void* ptr1 = kmalloc(128);
+    terminal_writestring("Allocated 128 bytes\n");
     
-    terminal_writestring("Allocated 3 blocks (100, 200, 50 bytes)\n");
+    void* ptr2 = kmalloc(256);
+    terminal_writestring("Allocated 256 bytes\n");
     
-    if (ptr1) terminal_writestring("Block 1: OK\n");
-    else terminal_writestring("Block 1: FAILED\n");
+    void* ptr3 = kmalloc(64);
+    terminal_writestring("Allocated 64 bytes\n");
     
-    if (ptr2) terminal_writestring("Block 2: OK\n");
-    else terminal_writestring("Block 2: FAILED\n");
-    
-    if (ptr3) terminal_writestring("Block 3: OK\n");
-    else terminal_writestring("Block 3: FAILED\n");
-    
-    // Записываем данные в блоки
-    if (ptr1) {
-        char* data1 = (char*)ptr1;
-        for (int i = 0; i < 10; i++) {
-            data1[i] = 'A' + i;
-        }
-        terminal_writestring("Data written to block 1\n");
-    }
-    
-    // Освобождаем память
     kfree(ptr2);
     terminal_writestring("Block 2 freed\n");
     
@@ -1056,6 +1227,68 @@ void command_paging(void) {
         terminal_writestring("Virtual memory is now active!\n");
     }
     terminal_writestring("\n");
+}
+
+// === КОМАНДЫ ПЛАНИРОВЩИКА ===
+
+void command_tasks(void) {
+    terminal_writestring("Task List:\n");
+    terminal_writestring("ID   Name             State    Priority\n");
+    terminal_writestring("------------------------------------\n");
+    
+    if (!task_list) {
+        terminal_writestring("No tasks created yet.\n\n");
+        return;
+    }
+    
+    task_t* task = task_list;
+    while (task) {
+        print_number(task->id);
+        terminal_writestring("    ");
+        terminal_writestring(task->name);
+        
+        // Выравнивание
+        int name_len = strlen(task->name);
+        for (int i = name_len; i < 16; i++) {
+            terminal_putchar(' ');
+        }
+        
+        switch (task->state) {
+            case TASK_STATE_RUNNING:
+                terminal_writestring("RUNNING  ");
+                break;
+            case TASK_STATE_READY:
+                terminal_writestring("READY    ");
+                break;
+            case TASK_STATE_BLOCKED:
+                terminal_writestring("BLOCKED  ");
+                break;
+            case TASK_STATE_DEAD:
+                terminal_writestring("DEAD     ");
+                break;
+            default:
+                terminal_writestring("UNKNOWN  ");
+        }
+        
+        print_number(task->priority);
+        terminal_putchar('\n');
+        
+        task = task->next;
+    }
+    
+    terminal_writestring("\nCurrent task: ");
+    if (current_task) {
+        terminal_writestring(current_task->name);
+    } else {
+        terminal_writestring("None");
+    }
+    terminal_writestring("\n\n");
+}
+
+void command_schedule(void) {
+    terminal_writestring("Triggering scheduler...\n");
+    schedule();
+    terminal_writestring("Scheduler executed\n\n");
 }
 
 // === КОМАНДЫ ФАЙЛОВОЙ СИСТЕМЫ ===
@@ -1172,20 +1405,11 @@ void command_echo(const char* args) {
     }
     
     // Записываем данные
-    if (fs_write_file(filename, text, i) == 0) {
+    if (fs_write_file(filename, text, strlen(text)) == 0) {
         terminal_writestring("Text written to ");
         terminal_writestring(filename);
         terminal_writestring("\n");
     }
-}
-
-// Простое сравнение строк
-int strcmp(const char* str1, const char* str2) {
-    while (*str1 && (*str1 == *str2)) {
-        str1++;
-        str2++;
-    }
-    return *str1 - *str2;
 }
 
 void execute_command(const char* command) {
@@ -1232,6 +1456,10 @@ void execute_command(const char* command) {
         command_vmem();
     } else if (strcmp(cmd, "paging") == 0) {
         command_paging();
+    } else if (strcmp(cmd, "tasks") == 0) {
+        command_tasks();
+    } else if (strcmp(cmd, "schedule") == 0) {
+        command_schedule();
     } else if (strcmp(cmd, "ls") == 0) {
         command_ls();
     } else if (strcmp(cmd, "touch") == 0) {
@@ -1295,8 +1523,8 @@ void keyboard_handler(void) {
 // Главная функция
 void kernel_main(void) {
     terminal_clear();
-    terminal_writestring("MyOS v0.5!\n");
-    terminal_writestring("==========\n\n");
+    terminal_writestring("MyOS v0.6 - Advanced Operating System!\n");
+    terminal_writestring("=====================================\n\n");
 
     // Инициализация управления памятью
     init_memory_management();
@@ -1311,6 +1539,9 @@ void kernel_main(void) {
     // Инициализация файловой системы
     init_filesystem();
     terminal_writestring("File system ready\n");
+    
+    // Инициализация планировщика задач
+    init_scheduler();
 
     // Настройка IDT
     idtp.limit = sizeof(idt) - 1;
@@ -1333,16 +1564,22 @@ void kernel_main(void) {
     idt_set_gate(33, (uint32_t)irq1_handler, 0x08, 0x8E);
     idt_flush();
 
-    // ПОЛНАЯ инициализация системы для работы с GRUB
+    // Инициализация системы для работы с GRUB
     initialize_system();
+
+    // Создание демонстрационных задач
+    create_task("idle", idle_task, 255);
+    create_task("demo1", demo_task1, 10);
+    create_task("demo2", demo_task2, 20);
+    terminal_writestring("Demo tasks created\n");
 
     // Включаем прерывания
     asm volatile("sti");
 
     // Инициализация шелла
     command_clear();
-    terminal_writestring("Welcome to MyOS!\n");
-    terminal_writestring("Type 'help' for available commands.\n");
+    terminal_writestring("Welcome to MyOS v0.6!\n");
+    terminal_writestring("Type 'help' for available commands.\n\n");
     
     shell_ready = 1;
     shell_prompt();
