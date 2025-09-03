@@ -98,13 +98,19 @@ extern void irq1_handler(void);
 
 // Обработчик клавиатуры
 void keyboard_handler(void) {
+    // Читаем скан-код из порта клавиатуры
     uint8_t scancode = inb(KEYBOARD_DATA_PORT);
-    outb(PIC1_COMMAND, PIC_EOI);
     
+    // Проверяем, что это нажатие клавиши (не отпускание)
     if (!(scancode & 0x80) && scancode < 128) {
         char ascii = scancode_to_ascii[scancode];
-        if (ascii) terminal_putchar(ascii);
+        if (ascii) {
+            terminal_putchar(ascii);
+        }
     }
+    
+    // Отправляем сигнал завершения прерывания в PIC
+    outb(PIC1_COMMAND, PIC_EOI);
 }
 
 // Главная функция
@@ -121,16 +127,26 @@ void kernel_main(void) {
         idt_set_gate(i, 0, 0, 0);
     }
     
-    // Устанавливаем обработчик клавиатуры
+    // Устанавливаем обработчик клавиатуры (IRQ1 = прерывание 33)
     idt_set_gate(33, (uint32_t)irq1_handler, 0x08, 0x8E);
     idt_flush();
     
-    // Настройка PIC
-    outb(0x20, 0x11); outb(0xA0, 0x11);
-    outb(0x21, 0x20); outb(0xA1, 0x28);
-    outb(0x21, 0x04); outb(0xA1, 0x02);
-    outb(0x21, 0x01); outb(0xA1, 0x01);
-    outb(0x21, 0x00); outb(0xA1, 0x00);
+    // Настройка PIC (Программируемый контроллер прерываний)
+    // Инициализация главного PIC
+    outb(0x20, 0x11); // ICW1: Инициализация + требуется ICW4
+    outb(0x21, 0x20); // ICW2: Смещение прерываний на 0x20 (32)
+    outb(0x21, 0x04); // ICW3: Подчиненный PIC на IRQ2
+    outb(0x21, 0x01); // ICW4: Режим 8086
+    
+    // Инициализация подчиненного PIC
+    outb(0xA0, 0x11); // ICW1: Инициализация + требуется ICW4
+    outb(0xA1, 0x28); // ICW2: Смещение прерываний на 0x28 (40)
+    outb(0xA1, 0x02); // ICW3: Подключен к главному PIC через IRQ2
+    outb(0xA1, 0x01); // ICW4: Режим 8086
+    
+    // Включаем только клавиатурное прерывание (IRQ1)
+    outb(0x21, 0xFD); // Маска: все заблокированы кроме IRQ1
+    outb(0xA1, 0xFF); // Маска: все заблокированы на подчиненном PIC
     
     asm volatile("sti");
     
