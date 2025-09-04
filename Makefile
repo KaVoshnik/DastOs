@@ -17,6 +17,7 @@ LDFLAGS = -m elf_i386 -T $(SRC_DIR)/linker.ld
 BOOT_ASM = $(SRC_DIR)/boot/boot.asm
 INTERRUPTS_ASM = $(SRC_DIR)/kernel/interrupts.asm
 KERNEL_C = $(SRC_DIR)/kernel/kernel.c
+KEYBOARD_C = $(SRC_DIR)/kernel/keyboard.c
 CONTEXT_ASM = $(SRC_DIR)/kernel/context.asm
 SYSCALLS_ASM = $(SRC_DIR)/kernel/syscalls.asm
 USER_MODE_ASM = $(SRC_DIR)/kernel/usermode.asm
@@ -25,10 +26,11 @@ USER_MODE_ASM = $(SRC_DIR)/kernel/usermode.asm
 BOOT_OBJ = $(BUILD_DIR)/boot.o
 INTERRUPTS_OBJ = $(BUILD_DIR)/interrupts.o
 KERNEL_OBJ = $(BUILD_DIR)/kernel.o
+KEYBOARD_OBJ = $(BUILD_DIR)/keyboard.o
 CONTEXT_OBJ = $(BUILD_DIR)/context.o
 SYSCALLS_OBJ = $(BUILD_DIR)/syscalls.o
 USER_MODE_OBJ = $(BUILD_DIR)/usermode.o
-OBJECTS = $(BOOT_OBJ) $(INTERRUPTS_OBJ) $(KERNEL_OBJ) $(CONTEXT_OBJ) $(SYSCALLS_OBJ) $(USER_MODE_OBJ)
+OBJECTS = $(BOOT_OBJ) $(INTERRUPTS_OBJ) $(KERNEL_OBJ) $(KEYBOARD_OBJ) $(CONTEXT_OBJ) $(SYSCALLS_OBJ) $(USER_MODE_OBJ)
 
 # Выходные файлы
 KERNEL_BIN = $(BUILD_DIR)/myos.bin
@@ -59,6 +61,9 @@ $(USER_MODE_OBJ): $(USER_MODE_ASM) | $(BUILD_DIR)
 
 $(KERNEL_OBJ): $(KERNEL_C) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(KERNEL_C) -o $(KERNEL_OBJ)
+
+$(KEYBOARD_OBJ): $(KEYBOARD_C) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(KEYBOARD_C) -o $(KEYBOARD_OBJ)
 
 # Связывание ядра
 $(KERNEL_BIN): $(OBJECTS)

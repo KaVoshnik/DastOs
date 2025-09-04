@@ -5,6 +5,11 @@ typedef unsigned int   size_t;
 
 #define NULL ((void*)0)
 
+// Include модулей
+#include "../include/types.h"
+#include "../include/elf.h"
+#include "../include/keyboard.h"
+
 #define VGA_MEMORY 0xB8000
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
@@ -207,48 +212,7 @@ typedef struct {
     uint16_t cs, ds, es, fs, gs, ss;
 } registers_t;
 
-// === ELF СТРУКТУРЫ ===
-
-// ELF header structure (32-bit)
-typedef struct {
-    uint8_t  e_ident[16];         // Magic number and other info
-    uint16_t e_type;              // Object file type
-    uint16_t e_machine;           // Architecture
-    uint32_t e_version;           // Object file version
-    uint32_t e_entry;             // Entry point virtual address
-    uint32_t e_phoff;             // Program header table file offset
-    uint32_t e_shoff;             // Section header table file offset
-    uint32_t e_flags;             // Processor-specific flags
-    uint16_t e_ehsize;            // ELF header size in bytes
-    uint16_t e_phentsize;         // Program header table entry size
-    uint16_t e_phnum;             // Program header table entry count
-    uint16_t e_shentsize;         // Section header table entry size
-    uint16_t e_shnum;             // Section header table entry count
-    uint16_t e_shstrndx;          // Section header string table index
-} elf_header_t;
-
-// Program header structure (32-bit)
-typedef struct {
-    uint32_t p_type;              // Segment type
-    uint32_t p_offset;            // Segment file offset
-    uint32_t p_vaddr;             // Segment virtual address
-    uint32_t p_paddr;             // Segment physical address
-    uint32_t p_filesz;            // Segment size in file
-    uint32_t p_memsz;             // Segment size in memory
-    uint32_t p_flags;             // Segment flags
-    uint32_t p_align;             // Segment alignment
-} elf_program_header_t;
-
-// ELF loader context
-typedef struct {
-    uint8_t* data;                // ELF file data in memory
-    uint32_t size;                // Size of ELF file
-    elf_header_t* header;         // Pointer to ELF header
-    elf_program_header_t* pheaders; // Pointer to program headers
-    uint32_t load_base;           // Base address where ELF is loaded
-    uint32_t entry_point;         // Entry point address
-    int valid;                    // Whether ELF file is valid
-} elf_loader_t;
+// ELF структуры теперь определены в elf.h
 
 // Структура задачи
 typedef struct task {
@@ -301,11 +265,8 @@ char command_buffer[COMMAND_BUFFER_SIZE];
 int command_length = 0;
 int shell_ready = 0;
 
-// Состояние клавиатуры
-int shift_pressed = 0;
-int ctrl_pressed = 0;
-int alt_pressed = 0;
-int caps_lock_on = 0;
+// Переменные шелла для обработки ввода
+void shell_keyboard_callback(keyboard_event_t* event);
 
 // Предварительные объявления всех функций
 void terminal_writestring(const char* data);
@@ -332,12 +293,8 @@ void schedule(void);
 void task_yield(void);
 void switch_to_task(task_t* task);
 
-// Объявления функций ELF-загрузчика
-int elf_validate(uint8_t* data, uint32_t size);
-int elf_parse(elf_loader_t* loader, uint8_t* data, uint32_t size);
-uint32_t elf_load_program(elf_loader_t* loader);
-int elf_get_entry_point(elf_loader_t* loader, uint32_t* entry);
-void elf_cleanup(elf_loader_t* loader);
+// Объявления функций ELF-загрузчика теперь в elf.h
+// Локальные функции
 task_t* create_elf_task(const char* name, uint8_t* elf_data, uint32_t elf_size, uint32_t priority);
 int load_elf_from_file(const char* filename, uint8_t** elf_data, uint32_t* elf_size);
 void cleanup_elf_task(task_t* task);
@@ -377,28 +334,33 @@ extern int syscall3(int syscall_num, int arg0, int arg1, int arg2);
 extern int syscall4(int syscall_num, int arg0, int arg1, int arg2, int arg3);
 extern int syscall5(int syscall_num, int arg0, int arg1, int arg2, int arg3, int arg4);
 
-// Scancode таблицы для разных режимов
-const char scancode_normal[128] = {
-    0, 27, '1','2','3','4','5','6','7','8','9','0','-','=','\b','\t',
-    'q','w','e','r','t','y','u','i','o','p','[',']','\n',0,
-    'a','s','d','f','g','h','j','k','l',';','\'','`',0,'\\',
-    'z','x','c','v','b','n','m',',','.','/',0,'*',0,' ',
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-};
-
-const char scancode_shift[128] = {
-    0, 27, '!','@','#','$','%','^','&','*','(',')','_','+','\b','\t',
-    'Q','W','E','R','T','Y','U','I','O','P','{','}','\n',0,
-    'A','S','D','F','G','H','J','K','L',':','"','~',0,'|',
-    'Z','X','C','V','B','N','M','<','>','?',0,'*',0,' ',
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-};
+// Callback для обработки клавиатуры в шелле
+void shell_keyboard_callback(keyboard_event_t* event) {
+    if (!event->pressed || !event->character) {
+        return; // Обрабатываем только нажатия с символами
+    }
+    
+    char c = event->character;
+    
+    if (c == '\n') {
+        // Enter - выполняем команду
+        command_buffer[command_length] = '\0';
+        terminal_putchar('\n');
+        execute_command(command_buffer);
+        command_length = 0;
+        shell_prompt();
+    } else if (c == '\b') {
+        // Backspace
+        if (command_length > 0) {
+            command_length--;
+            terminal_putchar('\b');
+        }
+    } else if (command_length < COMMAND_BUFFER_SIZE - 1) {
+        // Обычный символ
+        command_buffer[command_length++] = c;
+        terminal_putchar(c);
+    }
+}
 
 // Порты
 static inline void outb(uint16_t port, uint8_t val) {
@@ -1353,12 +1315,7 @@ void switch_to_task(task_t* task) {
     if (!task) return;
     
     // В реальной ОС здесь было бы переключение контекста
-    // Пока что просто выводим информацию
-    terminal_writestring("Switching to task: ");
-    terminal_writestring(task->name);
-    terminal_writestring(" (ID: ");
-    print_number(task->id);
-    terminal_writestring(")\n");
+    // Переключение происходит без вывода сообщений
 }
 
 void task_yield(void) {
@@ -1419,80 +1376,8 @@ void handle_page_fault(void) {
     terminal_writestring("\n");
 }
 
-void keyboard_handler(void) {
-    uint8_t scancode = inb(KEYBOARD_DATA_PORT);
-    
-    // Обработка клавиатуры (упрощенная)
-    if (scancode < 128) {
-        char c = 0;
-        
-        // Обработка модификаторов
-        switch (scancode) {
-            case KEY_LSHIFT_PRESSED:
-            case KEY_RSHIFT_PRESSED:
-                shift_pressed = 1;
-                break;
-            case KEY_LSHIFT_RELEASED:
-            case KEY_RSHIFT_RELEASED:
-                shift_pressed = 0;
-                break;
-            case KEY_CTRL_PRESSED:
-                ctrl_pressed = 1;
-                break;
-            case KEY_CTRL_RELEASED:
-                ctrl_pressed = 0;
-                break;
-            case KEY_ALT_PRESSED:
-                alt_pressed = 1;
-                break;
-            case KEY_ALT_RELEASED:
-                alt_pressed = 0;
-                break;
-            case KEY_CAPS_LOCK:
-                caps_lock_on = !caps_lock_on;
-                break;
-            default:
-                // Обычные клавиши
-                if (shift_pressed) {
-                    c = scancode_shift[scancode];
-                } else {
-                    c = scancode_normal[scancode];
-                }
-                
-                // Caps Lock для букв
-                if (caps_lock_on && c >= 'a' && c <= 'z') {
-                    c -= 32; // Преобразуем в заглавную
-                } else if (caps_lock_on && c >= 'A' && c <= 'Z') {
-                    c += 32; // Преобразуем в строчную
-                }
-                
-                if (c != 0) {
-                    if (c == '\n') {
-                        // Enter - выполняем команду
-                        command_buffer[command_length] = '\0';
-                        terminal_putchar('\n');
-                        execute_command(command_buffer);
-                        command_length = 0;
-                        shell_prompt();
-                    } else if (c == '\b') {
-                        // Backspace
-                        if (command_length > 0) {
-                            command_length--;
-                            terminal_putchar('\b');
-                        }
-                    } else if (command_length < COMMAND_BUFFER_SIZE - 1) {
-                        // Обычный символ
-                        command_buffer[command_length++] = c;
-                        terminal_putchar(c);
-                    }
-                }
-                break;
-        }
-    }
-    
-    // Отправляем EOI
-    outb(PIC1_COMMAND, PIC_EOI);
-}
+// Старая функция keyboard_handler заменена на новый модуль клавиатуры
+// Теперь используется keyboard_handler из keyboard.c
 
 void timer_interrupt_handler(void) {
     timer_ticks++;
@@ -1654,44 +1539,57 @@ void command_memtest(void) {
 }
 
 void command_keyboard(void) {
-    terminal_writestring("Keyboard Status:\n");
+    terminal_writestring("Keyboard Status (v2.0):\n");
+    
+    uint8_t modifiers = keyboard_get_modifiers();
+    keyboard_state_t* state = keyboard_get_state();
     
     terminal_writestring("  Modifier Keys:\n");
     terminal_writestring("    Shift: ");
-    if (shift_pressed) {
+    if (IS_SHIFT_PRESSED(modifiers)) {
         terminal_writestring("PRESSED\n");
     } else {
         terminal_writestring("Released\n");
     }
     
     terminal_writestring("    Ctrl:  ");
-    if (ctrl_pressed) {
+    if (IS_CTRL_PRESSED(modifiers)) {
         terminal_writestring("PRESSED\n");
     } else {
         terminal_writestring("Released\n");
     }
     
     terminal_writestring("    Alt:   ");
-    if (alt_pressed) {
+    if (IS_ALT_PRESSED(modifiers)) {
         terminal_writestring("PRESSED\n");
     } else {
         terminal_writestring("Released\n");
     }
     
     terminal_writestring("  Caps Lock: ");
-    if (caps_lock_on) {
+    if (IS_CAPS_ACTIVE(modifiers)) {
         terminal_writestring("ON\n");
     } else {
         terminal_writestring("OFF\n");
     }
     
-    terminal_writestring("\n  Features:\n");
-    terminal_writestring("    - Full scancode support\n");
-    terminal_writestring("    - Shift for uppercase and symbols\n");
-    terminal_writestring("    - Caps Lock toggle\n");
-    terminal_writestring("    - Ctrl+C to cancel commands\n");
-    terminal_writestring("    - Ctrl+L to clear screen\n");
-    terminal_writestring("\n  Try typing with different modifiers!\n\n");
+    terminal_writestring("  Last Key: ");
+    if (state->last_char) {
+        terminal_putchar(state->last_char);
+        terminal_writestring(" (scancode: ");
+        print_number(state->last_scancode);
+        terminal_writestring(")\n");
+    } else {
+        terminal_writestring("None\n");
+    }
+    
+    terminal_writestring("\n  New Features v2.0:\n");
+    terminal_writestring("    - Extended key support (F1-F12, arrows, etc.)\n");
+    terminal_writestring("    - E0-prefixed scancodes\n");
+    terminal_writestring("    - Event-driven architecture\n");
+    terminal_writestring("    - Modular keyboard system\n");
+    terminal_writestring("    - Full 256-key scancode table\n");
+    terminal_writestring("\n  Try all keys including F1-F12!\n\n");
 }
 
 void command_tasks(void) {
@@ -2110,6 +2008,12 @@ void kernel_main(void) {
     // Инициализация таймера (100 Hz)
     init_timer(TIMER_FREQUENCY);
     
+    // Инициализация модуля клавиатуры
+    terminal_writestring("Initializing keyboard module...\n");
+    keyboard_init();
+    keyboard_set_callback(shell_keyboard_callback);
+    terminal_writestring("Keyboard module ready\n");
+    
     // Включаем прерывания
     terminal_writestring("Enabling interrupts...\n");
     asm volatile("sti");
@@ -2125,19 +2029,8 @@ void kernel_main(void) {
     // Инициализация шелла
     terminal_writestring("Starting ELF-enabled shell...\n");
     enable_cursor(14, 15);
-    terminal_writestring("\n=== Welcome to MyOS v1.1 with ELF Loader ===\n");
-    terminal_writestring("Advanced Features:\n");
-    terminal_writestring("  * Task scheduling with context switching\n");
-    terminal_writestring("  * System calls (INT 0x80)\n");
-    terminal_writestring("  * User mode support\n");
-    terminal_writestring("  * Timer-driven multitasking\n");
-    terminal_writestring("  * Device drivers (keyboard, VGA, timer)\n");
-    terminal_writestring("  * Virtual memory management\n");
-    terminal_writestring("  * Simple file system\n");
-    terminal_writestring("  * ELF executable loader\n");
-    terminal_writestring("  * User mode program execution\n\n");
-    terminal_writestring("Type 'help' for available commands.\n");
-    terminal_writestring("Try 'testelf' to test ELF loader or 'run <file>' to execute ELF programs.\n\n");
+    terminal_writestring("\n=== MyOS v2.0 ===\n");
+    terminal_writestring("Type 'help' for available commands.\n\n");
     
     shell_ready = 1;
     shell_prompt();
