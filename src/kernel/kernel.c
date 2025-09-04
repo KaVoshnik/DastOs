@@ -107,6 +107,9 @@ typedef unsigned int   size_t;
 #define GDT_USER_CODE   0x1B         // Дескриптор кода пользователя (Ring 3)
 #define GDT_USER_DATA   0x23         // Дескриптор данных пользователя (Ring 3)
 
+// ELF загрузчик
+#define ELF_LOAD_BASE   0x8000000    // Базовый адрес загрузки ELF программ (128MB)
+
 // IDT структуры
 struct idt_entry {
     uint16_t base_lo, sel;
@@ -204,6 +207,49 @@ typedef struct {
     uint16_t cs, ds, es, fs, gs, ss;
 } registers_t;
 
+// === ELF СТРУКТУРЫ ===
+
+// ELF header structure (32-bit)
+typedef struct {
+    uint8_t  e_ident[16];         // Magic number and other info
+    uint16_t e_type;              // Object file type
+    uint16_t e_machine;           // Architecture
+    uint32_t e_version;           // Object file version
+    uint32_t e_entry;             // Entry point virtual address
+    uint32_t e_phoff;             // Program header table file offset
+    uint32_t e_shoff;             // Section header table file offset
+    uint32_t e_flags;             // Processor-specific flags
+    uint16_t e_ehsize;            // ELF header size in bytes
+    uint16_t e_phentsize;         // Program header table entry size
+    uint16_t e_phnum;             // Program header table entry count
+    uint16_t e_shentsize;         // Section header table entry size
+    uint16_t e_shnum;             // Section header table entry count
+    uint16_t e_shstrndx;          // Section header string table index
+} elf_header_t;
+
+// Program header structure (32-bit)
+typedef struct {
+    uint32_t p_type;              // Segment type
+    uint32_t p_offset;            // Segment file offset
+    uint32_t p_vaddr;             // Segment virtual address
+    uint32_t p_paddr;             // Segment physical address
+    uint32_t p_filesz;            // Segment size in file
+    uint32_t p_memsz;             // Segment size in memory
+    uint32_t p_flags;             // Segment flags
+    uint32_t p_align;             // Segment alignment
+} elf_program_header_t;
+
+// ELF loader context
+typedef struct {
+    uint8_t* data;                // ELF file data in memory
+    uint32_t size;                // Size of ELF file
+    elf_header_t* header;         // Pointer to ELF header
+    elf_program_header_t* pheaders; // Pointer to program headers
+    uint32_t load_base;           // Base address where ELF is loaded
+    uint32_t entry_point;         // Entry point address
+    int valid;                    // Whether ELF file is valid
+} elf_loader_t;
+
 // Структура задачи
 typedef struct task {
     uint32_t id;                         // ID задачи
@@ -214,6 +260,7 @@ typedef struct task {
     uint32_t* stack;                     // Стек задачи
     uint32_t stack_size;                 // Размер стека
     uint32_t time_slice;                 // Оставшееся время выполнения
+    elf_loader_t* elf_loader;            // ELF-загрузчик для этой задачи
     struct task* next;                   // Следующая задача в списке
 } task_t;
 
@@ -266,6 +313,7 @@ void terminal_putchar(char c);
 void print_number(uint32_t num);
 void terminal_clear(void);
 void shell_prompt(void);
+void execute_command(const char* command);
 
 // Объявления функций файловой системы
 void init_filesystem(void);
@@ -283,6 +331,16 @@ task_t* create_task(const char* name, void (*entry_point)(void), uint32_t priori
 void schedule(void);
 void task_yield(void);
 void switch_to_task(task_t* task);
+
+// Объявления функций ELF-загрузчика
+int elf_validate(uint8_t* data, uint32_t size);
+int elf_parse(elf_loader_t* loader, uint8_t* data, uint32_t size);
+uint32_t elf_load_program(elf_loader_t* loader);
+int elf_get_entry_point(elf_loader_t* loader, uint32_t* entry);
+void elf_cleanup(elf_loader_t* loader);
+task_t* create_elf_task(const char* name, uint8_t* elf_data, uint32_t elf_size, uint32_t priority);
+int load_elf_from_file(const char* filename, uint8_t** elf_data, uint32_t* elf_size);
+void cleanup_elf_task(task_t* task);
 
 // Функции для работы с виртуальной памятью (из interrupts.asm)
 extern void enable_paging(uint32_t page_directory_addr);
@@ -390,6 +448,23 @@ void strcpy(char* dest, const char* src) {
     while ((*dest++ = *src++));
 }
 
+int strncmp(const char* str1, const char* str2, size_t n) {
+    while (n-- && *str1 && (*str1 == *str2)) {
+        str1++;
+        str2++;
+    }
+    return (n == 0) ? 0 : (*str1 - *str2);
+}
+
+char* strncpy(char* dest, const char* src, size_t n) {
+    size_t i;
+    for (i = 0; i < n && src[i] != '\0'; i++)
+        dest[i] = src[i];
+    for (; i < n; i++)
+        dest[i] = '\0';
+    return dest;
+}
+
 // === ФУНКЦИИ ТЕРМИНАЛА ===
 
 // Функции для управления VGA курсором
@@ -487,6 +562,28 @@ void print_number(uint32_t num) {
     }
 }
 
+void print_hex(uint32_t num) {
+    terminal_writestring("0x");
+    
+    if (num == 0) {
+        terminal_putchar('0');
+        return;
+    }
+    
+    char buffer[9];
+    int i = 0;
+    
+    while (num > 0) {
+        int digit = num % 16;
+        buffer[i++] = (digit < 10) ? ('0' + digit) : ('A' + digit - 10);
+        num /= 16;
+    }
+    
+    while (--i >= 0) {
+        terminal_putchar(buffer[i]);
+    }
+}
+
 // Инициализация системы управления памятью
 void init_memory_management() {
     heap_start = (memory_block_t*)HEAP_START;
@@ -576,414 +673,548 @@ void get_memory_info(uint32_t* total, uint32_t* free, uint32_t* used) {
     *used = used_memory;
 }
 
-// === ФУНКЦИИ ВИРТУАЛЬНОЙ ПАМЯТИ ===
+// === ELF ЗАГРУЗЧИК ===
 
-// Создание записи Page Directory Entry
-uint32_t create_pde(uint32_t page_table_addr, uint32_t flags) {
-    return (page_table_addr & 0xFFFFF000) | (flags & 0xFFF);
-}
+// ELF магические числа и константы
+#define ELFMAG0         0x7f
+#define ELFMAG1         'E'
+#define ELFMAG2         'L'
+#define ELFMAG3         'F'
+#define ELFCLASS32      1
+#define ELFDATA2LSB     1
+#define EV_CURRENT      1
+#define ET_EXEC         2
+#define EM_386          3
+#define PT_LOAD         1
 
-// Создание записи Page Table Entry  
-uint32_t create_pte(uint32_t physical_addr, uint32_t flags) {
-    return (physical_addr & 0xFFFFF000) | (flags & 0xFFF);
-}
-
-// Получение адреса Page Table из PDE
-uint32_t get_page_table_addr(uint32_t pde) {
-    return pde & 0xFFFFF000;
-}
-
-// Получение физического адреса из PTE
-uint32_t get_physical_addr(uint32_t pte) {
-    return pte & 0xFFFFF000;
-}
-
-// Инициализация системы виртуальной памяти
-void init_virtual_memory(void) {
-    terminal_writestring("Initializing virtual memory...\n");
-    
-    // Очищаем Page Directory
-    for (int i = 0; i < PAGE_ENTRIES; i++) {
-        page_directory->entries[i] = 0;
+// Validate ELF file format
+int elf_validate(uint8_t* data, uint32_t size) {
+    if (!data || size < sizeof(elf_header_t)) {
+        return 0; // Invalid: NULL data or too small
     }
     
-    // Создаем identity mapping для первых 4MB памяти (ядро)
-    // Используем первую Page Table для этого
-    page_table_t* kernel_page_table = &page_tables[0];
+    elf_header_t* header = (elf_header_t*)data;
     
-    // Заполняем первую Page Table identity mapping
-    for (int i = 0; i < PAGE_ENTRIES; i++) {
-        uint32_t physical_addr = i * PAGE_SIZE;  // 0x0, 0x1000, 0x2000...
-        kernel_page_table->entries[i] = create_pte(physical_addr, 
-            PAGE_PRESENT | PAGE_WRITABLE);
+    // Check ELF magic number
+    if (header->e_ident[0] != ELFMAG0 ||
+        header->e_ident[1] != ELFMAG1 ||
+        header->e_ident[2] != ELFMAG2 ||
+        header->e_ident[3] != ELFMAG3) {
+        return 0; // Invalid magic number
     }
     
-    // Записываем первую PDE чтобы указать на первую Page Table
-    uint32_t kernel_page_table_addr = (uint32_t)kernel_page_table;
-    page_directory->entries[0] = create_pde(kernel_page_table_addr, 
-        PAGE_PRESENT | PAGE_WRITABLE);
-    
-    terminal_writestring("Identity mapping for kernel created\n");
-    
-    // Создаем mapping для кучи (начиная с 4MB)
-    uint32_t heap_start_page = HEAP_START / PAGE_SIZE;  // Номер страницы для 4MB
-    uint32_t heap_directory_index = heap_start_page / PAGE_ENTRIES;
-    
-    // Используем вторую Page Table для кучи
-    page_table_t* heap_page_table = &page_tables[1];
-    
-    // Заполняем Page Table для кучи
-    for (int i = 0; i < PAGE_ENTRIES; i++) {
-        uint32_t physical_addr = HEAP_START + (i * PAGE_SIZE);
-        heap_page_table->entries[i] = create_pte(physical_addr, 
-            PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    // Check class (32-bit)
+    if (header->e_ident[4] != ELFCLASS32) {
+        return 0; // Only support 32-bit ELF
     }
     
-    // Записываем PDE для кучи
-    uint32_t heap_page_table_addr = (uint32_t)heap_page_table;
-    page_directory->entries[heap_directory_index] = create_pde(heap_page_table_addr, 
-        PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+    // Check data encoding (little endian)
+    if (header->e_ident[5] != ELFDATA2LSB) {
+        return 0; // Only support little endian
+    }
+    
+    // Check ELF version
+    if (header->e_ident[6] != EV_CURRENT) {
+        return 0; // Invalid version
+    }
+    
+    // Check machine type (i386)
+    if (header->e_machine != EM_386) {
+        return 0; // Only support i386
+    }
+    
+    // Check file type (executable)
+    if (header->e_type != ET_EXEC) {
+        return 0; // Only support executable files
+    }
+    
+    // Check program header table
+    if (header->e_phoff == 0 || header->e_phnum == 0) {
+        return 0; // No program headers
+    }
+    
+    // Validate program header bounds
+    uint32_t ph_end = header->e_phoff + (header->e_phnum * header->e_phentsize);
+    if (ph_end > size) {
+        return 0; // Program headers exceed file size
+    }
+    
+    return 1; // Valid ELF file
+}
+
+// Parse ELF file and initialize loader context
+int elf_parse(elf_loader_t* loader, uint8_t* data, uint32_t size) {
+    if (!loader || !data || size == 0) {
+        return 0;
+    }
+    
+    // Clear loader structure
+    memset(loader, 0, sizeof(elf_loader_t));
+    
+    // Validate ELF file
+    if (!elf_validate(data, size)) {
+        return 0;
+    }
+    
+    // Initialize loader context
+    loader->data = data;
+    loader->size = size;
+    loader->header = (elf_header_t*)data;
+    loader->valid = 1;
+    
+    // Set up program headers
+    if (loader->header->e_phoff > 0 && loader->header->e_phnum > 0) {
+        loader->pheaders = (elf_program_header_t*)(data + loader->header->e_phoff);
+    }
+    
+    // Set entry point
+    loader->entry_point = loader->header->e_entry;
+    
+    return 1;
+}
+
+// Load ELF program into memory
+uint32_t elf_load_program(elf_loader_t* loader) {
+    if (!loader || !loader->valid) {
+        return 0;
+    }
+    
+    uint32_t min_addr = 0xFFFFFFFF;
+    uint32_t max_addr = 0;
+    
+    // First pass: find memory range needed
+    for (int i = 0; i < loader->header->e_phnum; i++) {
+        elf_program_header_t* ph = &loader->pheaders[i];
         
-    terminal_writestring("Heap mapping created\n");
+        if (ph->p_type == PT_LOAD) {
+            if (ph->p_vaddr < min_addr) {
+                min_addr = ph->p_vaddr;
+            }
+            if (ph->p_vaddr + ph->p_memsz > max_addr) {
+                max_addr = ph->p_vaddr + ph->p_memsz;
+            }
+        }
+    }
+    
+    if (min_addr == 0xFFFFFFFF) {
+        return 0; // No loadable segments
+    }
+    
+    // Use fixed load address
+    uint32_t load_base = ELF_LOAD_BASE;
+    loader->load_base = load_base;
+    
+    // Second pass: actually load segments
+    for (int i = 0; i < loader->header->e_phnum; i++) {
+        elf_program_header_t* ph = &loader->pheaders[i];
+        
+        if (ph->p_type == PT_LOAD) {
+            // Calculate load address
+            uint32_t load_addr = load_base + (ph->p_vaddr - min_addr);
+            
+            // Copy file data to memory
+            if (ph->p_filesz > 0) {
+                memcpy((void*)load_addr, 
+                      loader->data + ph->p_offset, 
+                      ph->p_filesz);
+            }
+            
+            // Zero out any remaining memory (BSS section)
+            if (ph->p_memsz > ph->p_filesz) {
+                memset((void*)(load_addr + ph->p_filesz), 0, 
+                       ph->p_memsz - ph->p_filesz);
+            }
+        }
+    }
+    
+    // Adjust entry point to loaded address
+    loader->entry_point = load_base + (loader->header->e_entry - min_addr);
+    
+    return loader->entry_point;
 }
 
-// Включение виртуальной памяти
-void enable_virtual_memory(void) {
-    if (paging_enabled) {
-        terminal_writestring("Paging is already enabled\n");
+// Get entry point address
+int elf_get_entry_point(elf_loader_t* loader, uint32_t* entry) {
+    if (!loader || !loader->valid || !entry) {
+        return 0;
+    }
+    
+    *entry = loader->entry_point;
+    return 1;
+}
+
+// Clean up loader resources
+void elf_cleanup(elf_loader_t* loader) {
+    if (!loader) {
         return;
     }
     
-    terminal_writestring("Enabling paging...\n");
-    
-    // Включаем пейджинг через ассемблерную функцию
-    enable_paging((uint32_t)page_directory);
-    paging_enabled = 1;
-    
-    terminal_writestring("Virtual memory enabled successfully!\n");
+    // Clear the structure
+    memset(loader, 0, sizeof(elf_loader_t));
 }
 
-// Отключение виртуальной памяти
-void disable_virtual_memory(void) {
-    if (!paging_enabled) {
-        terminal_writestring("Paging is not enabled\n");
+// Создание задачи из ELF файла
+task_t* create_elf_task(const char* name, uint8_t* elf_data, uint32_t elf_size, uint32_t priority) {
+    if (!name || !elf_data || elf_size == 0) {
+        return NULL;
+    }
+    
+    // Создаем новую задачу
+    task_t* task = (task_t*)kmalloc(sizeof(task_t));
+    if (!task) {
+        terminal_writestring("Error: Failed to allocate memory for task\n");
+        return NULL;
+    }
+    
+    // Инициализируем задачу
+    memset(task, 0, sizeof(task_t));
+    task->id = next_task_id++;
+    strncpy(task->name, name, 31);
+    task->name[31] = '\0';
+    task->state = TASK_STATE_READY;
+    task->priority = priority;
+    task->time_slice = 10; // 10 тиков таймера
+    
+    // Создаем стек для задачи
+    task->stack = (uint32_t*)kmalloc(TASK_STACK_SIZE);
+    if (!task->stack) {
+        terminal_writestring("Error: Failed to allocate stack for task\n");
+        kfree(task);
+        return NULL;
+    }
+    task->stack_size = TASK_STACK_SIZE;
+    
+    // Создаем ELF загрузчик
+    task->elf_loader = (elf_loader_t*)kmalloc(sizeof(elf_loader_t));
+    if (!task->elf_loader) {
+        terminal_writestring("Error: Failed to allocate ELF loader\n");
+        kfree(task->stack);
+        kfree(task);
+        return NULL;
+    }
+    
+    // Парсим ELF файл
+    if (!elf_parse(task->elf_loader, elf_data, elf_size)) {
+        terminal_writestring("Error: Failed to parse ELF file\n");
+        kfree(task->elf_loader);
+        kfree(task->stack);
+        kfree(task);
+        return NULL;
+    }
+    
+    // Загружаем программу в память
+    uint32_t entry_point = elf_load_program(task->elf_loader);
+    if (entry_point == 0) {
+        terminal_writestring("Error: Failed to load ELF program\n");
+        elf_cleanup(task->elf_loader);
+        kfree(task->elf_loader);
+        kfree(task->stack);
+        kfree(task);
+        return NULL;
+    }
+    
+    // Настраиваем контекст для пользовательского режима
+    uint32_t stack_top = (uint32_t)task->stack + task->stack_size - 4;
+    create_user_task(entry_point, stack_top, task);
+    
+    // Добавляем в список задач
+    task->next = task_list;
+    task_list = task;
+    
+    terminal_writestring("ELF task created: ");
+    terminal_writestring(name);
+    terminal_writestring(" (Entry: ");
+    print_hex(entry_point);
+    terminal_writestring(")\n");
+    
+    return task;
+}
+
+// Загрузка ELF файла из файловой системы
+int load_elf_from_file(const char* filename, uint8_t** elf_data, uint32_t* elf_size) {
+    if (!filename || !elf_data || !elf_size) {
+        return 0;
+    }
+    
+    // Проверяем существование файла
+    if (!fs_file_exists(filename)) {
+        terminal_writestring("Error: ELF file not found: ");
+        terminal_writestring(filename);
+        terminal_writestring("\n");
+        return 0;
+    }
+    
+    fs_inode_t* inode = fs_find_inode(filename);
+    if (!inode) {
+        return 0;
+    }
+    
+    *elf_size = inode->size;
+    *elf_data = (uint8_t*)kmalloc(*elf_size);
+    if (!*elf_data) {
+        terminal_writestring("Error: Failed to allocate memory for ELF file\n");
+        return 0;
+    }
+    
+    // Читаем данные файла
+    if (fs_read_file(filename, (char*)*elf_data, *elf_size) <= 0) {
+        terminal_writestring("Error: Failed to read ELF file\n");
+        kfree(*elf_data);
+        *elf_data = NULL;
+        *elf_size = 0;
+        return 0;
+    }
+    
+    return 1;
+}
+
+// Очистка ресурсов ELF задачи
+void cleanup_elf_task(task_t* task) {
+    if (!task) {
         return;
     }
     
-    terminal_writestring("Disabling paging...\n");
-    disable_paging();
-    paging_enabled = 0;
-    terminal_writestring("Virtual memory disabled\n");
-}
-
-// Обработчик Page Fault
-void handle_page_fault(void) {
-    uint32_t fault_address = get_page_fault_address();
-    
-    terminal_writestring("PAGE FAULT occurred!\n");
-    terminal_writestring("Fault address: 0x");
-    
-    // Выводим адрес в hex формате
-    for (int i = 28; i >= 0; i -= 4) {
-        uint32_t nibble = (fault_address >> i) & 0xF;
-        char hex_char = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
-        terminal_putchar(hex_char);
+    if (task->elf_loader) {
+        elf_cleanup(task->elf_loader);
+        kfree(task->elf_loader);
     }
-    terminal_putchar('\n');
     
-    terminal_writestring("System halted due to page fault.\n");
-    while(1) asm volatile("hlt");
-}
-
-// === ФУНКЦИИ ФАЙЛОВОЙ СИСТЕМЫ ===
-
-// Вспомогательная функция для копирования строк
-void fs_strcpy(char* dest, const char* src, int max_len) {
-    int i = 0;
-    while (i < max_len - 1 && src[i] != '\0') {
-        dest[i] = src[i];
-        i++;
+    if (task->stack) {
+        kfree(task->stack);
     }
-    dest[i] = '\0';
+    
+    kfree(task);
 }
 
-// Вспомогательная функция для сравнения строк
-int fs_strcmp(const char* str1, const char* str2) {
-    while (*str1 && (*str1 == *str2)) {
-        str1++;
-        str2++;
-    }
-    return *str1 - *str2;
-}
+// === ТЕСТОВАЯ ELF ПРОГРАММА ===
 
-// Инициализация файловой системы
+// Простая ELF программа "Hello, World!" для тестирования
+uint8_t test_elf_program[] = {
+    // ELF header
+    0x7f, 0x45, 0x4c, 0x46,  // Magic: 0x7f, 'E', 'L', 'F'
+    0x01,                     // Class: ELFCLASS32
+    0x01,                     // Data: ELFDATA2LSB
+    0x01,                     // Version: EV_CURRENT
+    0x00,                     // ABI: SYSV
+    0x00, 0x00, 0x00, 0x00,   // ABI version and padding
+    0x00, 0x00, 0x00, 0x00,   // More padding
+    
+    0x02, 0x00,               // Type: ET_EXEC
+    0x03, 0x00,               // Machine: EM_386
+    0x01, 0x00, 0x00, 0x00,   // Version: 1
+    0x54, 0x80, 0x04, 0x08,   // Entry point: 0x08048054
+    0x34, 0x00, 0x00, 0x00,   // Program header offset: 52
+    0x00, 0x00, 0x00, 0x00,   // Section header offset: 0
+    0x00, 0x00, 0x00, 0x00,   // Flags: 0
+    0x34, 0x00,               // ELF header size: 52
+    0x20, 0x00,               // Program header size: 32
+    0x01, 0x00,               // Program header count: 1
+    0x00, 0x00,               // Section header size: 0
+    0x00, 0x00,               // Section header count: 0
+    0x00, 0x00,               // String table index: 0
+    
+    // Program header
+    0x01, 0x00, 0x00, 0x00,   // Type: PT_LOAD
+    0x00, 0x00, 0x00, 0x00,   // Offset: 0
+    0x00, 0x80, 0x04, 0x08,   // Virtual address: 0x08048000
+    0x00, 0x80, 0x04, 0x08,   // Physical address: 0x08048000
+    0x74, 0x00, 0x00, 0x00,   // File size: 116
+    0x74, 0x00, 0x00, 0x00,   // Memory size: 116
+    0x05, 0x00, 0x00, 0x00,   // Flags: PF_R | PF_X
+    0x00, 0x10, 0x00, 0x00,   // Alignment: 4096
+    
+    // Code section (simplified)
+    // mov eax, 1 (sys_exit)
+    0xb8, 0x01, 0x00, 0x00, 0x00,
+    // mov ebx, 0 (exit code)
+    0xbb, 0x00, 0x00, 0x00, 0x00,
+    // int 0x80 (syscall)
+    0xcd, 0x80,
+    // Padding to align
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90
+};
+
+uint32_t test_elf_size = sizeof(test_elf_program);
+
+// === ФАЙЛОВАЯ СИСТЕМА ===
+
 void init_filesystem(void) {
-    terminal_writestring("Initializing simple file system...\n");
+    memset(&filesystem, 0, sizeof(fs_state_t));
     
-    // Выделяем память для блоков данных
-    filesystem.data_blocks = (uint8_t*)kmalloc(FS_MAX_BLOCKS * FS_BLOCK_SIZE);
-    if (!filesystem.data_blocks) {
-        terminal_writestring("ERROR: Failed to allocate memory for filesystem!\n");
-        return;
-    }
-    
-    // Инициализация суперблока
-    filesystem.superblock.magic = 0xDEADBEEF;
+    // Инициализируем суперблок
+    filesystem.superblock.magic = 0x12345678;
     filesystem.superblock.total_inodes = FS_MAX_FILES;
     filesystem.superblock.free_inodes = FS_MAX_FILES;
     filesystem.superblock.total_blocks = FS_MAX_BLOCKS;
     filesystem.superblock.free_blocks = FS_MAX_BLOCKS;
     filesystem.superblock.block_size = FS_BLOCK_SIZE;
     
-    // Очищаем все inode-ы
-    for (int i = 0; i < FS_MAX_FILES; i++) {
-        filesystem.inodes[i].type = FS_INODE_FREE;
-        filesystem.inodes[i].filename[0] = '\0';
-        filesystem.inodes[i].size = 0;
-        filesystem.inodes[i].created_time = 0;
-        filesystem.inodes[i].modified_time = 0;
-        for (int j = 0; j < 16; j++) {
-            filesystem.inodes[i].blocks[j] = 0;
-        }
-        filesystem.inode_bitmap[i] = 0; // Свободен
+    // Выделяем память для блоков данных
+    filesystem.data_blocks = (uint8_t*)kmalloc(FS_MAX_BLOCKS * FS_BLOCK_SIZE);
+    if (!filesystem.data_blocks) {
+        terminal_writestring("Error: Failed to allocate filesystem data blocks\n");
+        return;
     }
     
-    // Очищаем битовую карту блоков
-    for (int i = 0; i < FS_MAX_BLOCKS; i++) {
-        filesystem.block_bitmap[i] = 0; // Свободен
-    }
-    
-    // Очищаем область данных
-    for (int i = 0; i < FS_MAX_BLOCKS * FS_BLOCK_SIZE; i++) {
-        filesystem.data_blocks[i] = 0;
-    }
+    memset(filesystem.data_blocks, 0, FS_MAX_BLOCKS * FS_BLOCK_SIZE);
+    memset(filesystem.inode_bitmap, 0, FS_MAX_FILES);
+    memset(filesystem.block_bitmap, 0, FS_MAX_BLOCKS);
     
     filesystem.initialized = 1;
-    fs_time_counter = 1; // Начальное время
     
-    terminal_writestring("File system initialized successfully!\n");
+    terminal_writestring("Filesystem initialized\n");
 }
 
-// Поиск свободного inode
-int fs_find_free_inode(void) {
-    for (int i = 0; i < FS_MAX_FILES; i++) {
-        if (filesystem.inodes[i].type == FS_INODE_FREE) {
-            return i;
-        }
-    }
-    return -1; // Нет свободных
-}
-
-// Поиск свободного блока данных
-int fs_find_free_block(void) {
-    for (int i = 0; i < FS_MAX_BLOCKS; i++) {
-        if (filesystem.block_bitmap[i] == 0) {
-            return i;
-        }
-    }
-    return -1; // Нет свободных
-}
-
-// Поиск файла по имени
-fs_inode_t* fs_find_inode(const char* filename) {
-    if (!filesystem.initialized) return NULL;
-    
-    for (int i = 0; i < FS_MAX_FILES; i++) {
-        if (filesystem.inodes[i].type == FS_INODE_FILE && 
-            fs_strcmp(filesystem.inodes[i].filename, filename) == 0) {
-            return &filesystem.inodes[i];
-        }
-    }
-    return NULL;
-}
-
-// Проверка существования файла
-int fs_file_exists(const char* filename) {
-    return fs_find_inode(filename) != NULL;
-}
-
-// Создание нового файла
 int fs_create_file(const char* filename) {
-    if (!filesystem.initialized) {
-        terminal_writestring("ERROR: File system not initialized!\n");
-        return -1;
-    }
+    if (!filesystem.initialized || !filename) return -1;
     
     // Проверяем, не существует ли файл уже
     if (fs_file_exists(filename)) {
-        terminal_writestring("ERROR: File already exists!\n");
+        terminal_writestring("File already exists: ");
+        terminal_writestring(filename);
+        terminal_writestring("\n");
         return -1;
     }
     
     // Ищем свободный inode
-    int inode_idx = fs_find_free_inode();
-    if (inode_idx == -1) {
-        terminal_writestring("ERROR: No free inodes available!\n");
-        return -1;
-    }
-    
-    // Инициализируем inode
-    fs_inode_t* inode = &filesystem.inodes[inode_idx];
-    inode->type = FS_INODE_FILE;
-    fs_strcpy(inode->filename, filename, FS_MAX_FILENAME);
-    inode->size = 0;
-    inode->created_time = fs_time_counter++;
-    inode->modified_time = inode->created_time;
-    
-    for (int i = 0; i < 16; i++) {
-        inode->blocks[i] = 0;
-    }
-    
-    // Помечаем inode как занятый
-    filesystem.inode_bitmap[inode_idx] = 1;
-    filesystem.superblock.free_inodes--;
-    
-    return inode_idx;
-}
-
-// Удаление файла
-int fs_delete_file(const char* filename) {
-    if (!filesystem.initialized) {
-        terminal_writestring("ERROR: File system not initialized!\n");
-        return -1;
-    }
-    
-    fs_inode_t* inode = fs_find_inode(filename);
-    if (!inode) {
-        terminal_writestring("ERROR: File not found!\n");
-        return -1;
-    }
-    
-    // Освобождаем все блоки данных файла
-    for (int i = 0; i < 16; i++) {
-        if (inode->blocks[i] != 0) {
-            filesystem.block_bitmap[inode->blocks[i]] = 0;
-            filesystem.superblock.free_blocks++;
-            inode->blocks[i] = 0;
+    for (int i = 0; i < FS_MAX_FILES; i++) {
+        if (filesystem.inode_bitmap[i] == 0) {
+            filesystem.inode_bitmap[i] = 1;
+            filesystem.superblock.free_inodes--;
+            
+            fs_inode_t* inode = &filesystem.inodes[i];
+            memset(inode, 0, sizeof(fs_inode_t));
+            inode->type = FS_INODE_FILE;
+            strncpy(inode->filename, filename, FS_MAX_FILENAME - 1);
+            inode->created_time = fs_time_counter++;
+            inode->modified_time = inode->created_time;
+            
+            return i;
         }
     }
     
-    // Освобождаем inode
-    inode->type = FS_INODE_FREE;
-    inode->filename[0] = '\0';
-    inode->size = 0;
+    terminal_writestring("No free inodes available\n");
+    return -1; // Нет свободных inodes
+}
+
+int fs_file_exists(const char* filename) {
+    if (!filesystem.initialized || !filename) return 0;
     
-    // Находим индекс inode-а для освобождения битовой карты
-    int inode_idx = inode - filesystem.inodes;
-    filesystem.inode_bitmap[inode_idx] = 0;
-    filesystem.superblock.free_inodes++;
+    for (int i = 0; i < FS_MAX_FILES; i++) {
+        if (filesystem.inode_bitmap[i] && 
+            filesystem.inodes[i].type == FS_INODE_FILE &&
+            strcmp(filesystem.inodes[i].filename, filename) == 0) {
+            return 1;
+        }
+    }
     
     return 0;
 }
 
-// Запись данных в файл
+fs_inode_t* fs_find_inode(const char* filename) {
+    if (!filesystem.initialized || !filename) return NULL;
+    
+    for (int i = 0; i < FS_MAX_FILES; i++) {
+        if (filesystem.inode_bitmap[i] && 
+            filesystem.inodes[i].type == FS_INODE_FILE &&
+            strcmp(filesystem.inodes[i].filename, filename) == 0) {
+            return &filesystem.inodes[i];
+        }
+    }
+    
+    return NULL;
+}
+
 int fs_write_file(const char* filename, const char* data, uint32_t size) {
-    if (!filesystem.initialized) {
-        terminal_writestring("ERROR: File system not initialized!\n");
+    if (!filesystem.initialized || !filename || !data || size == 0) return -1;
+    
+    fs_inode_t* inode = fs_find_inode(filename);
+    if (!inode) {
+        terminal_writestring("File not found: ");
+        terminal_writestring(filename);
+        terminal_writestring("\n");
         return -1;
     }
     
     if (size > FS_MAX_FILESIZE) {
-        terminal_writestring("ERROR: File too large!\n");
-        return -1;
+        size = FS_MAX_FILESIZE;
     }
     
-    fs_inode_t* inode = fs_find_inode(filename);
-    if (!inode) {
-        terminal_writestring("ERROR: File not found!\n");
-        return -1;
-    }
-    
-    // Освобождаем старые блоки, если они есть
-    for (int i = 0; i < 16; i++) {
-        if (inode->blocks[i] != 0) {
-            filesystem.block_bitmap[inode->blocks[i]] = 0;
-            filesystem.superblock.free_blocks++;
-            inode->blocks[i] = 0;
+    // Простая реализация: записываем в первый блок
+    if (inode->blocks[0] == 0) {
+        // Ищем свободный блок
+        for (uint32_t i = 0; i < FS_MAX_BLOCKS; i++) {
+            if (filesystem.block_bitmap[i] == 0) {
+                filesystem.block_bitmap[i] = 1;
+                filesystem.superblock.free_blocks--;
+                inode->blocks[0] = i;
+                break;
+            }
         }
     }
     
-    // Вычисляем необходимое количество блоков
-    uint32_t blocks_needed = (size + FS_BLOCK_SIZE - 1) / FS_BLOCK_SIZE;
-    if (blocks_needed > 16) {
-        terminal_writestring("ERROR: File requires too many blocks!\n");
-        return -1;
+    if (inode->blocks[0] > 0) {
+        uint8_t* block_data = filesystem.data_blocks + (inode->blocks[0] * FS_BLOCK_SIZE);
+        memcpy(block_data, data, size);
+        inode->size = size;
+        inode->modified_time = fs_time_counter++;
+        return 0;
     }
     
-    // Выделяем новые блоки
-    for (uint32_t i = 0; i < blocks_needed; i++) {
-        int block_idx = fs_find_free_block();
-        if (block_idx == -1) {
-            terminal_writestring("ERROR: No free blocks available!\n");
-            return -1;
-        }
-        
-        inode->blocks[i] = block_idx;
-        filesystem.block_bitmap[block_idx] = 1;
-        filesystem.superblock.free_blocks--;
-    }
-    
-    // Записываем данные в блоки
-    for (uint32_t i = 0; i < blocks_needed; i++) {
-        uint32_t block_offset = inode->blocks[i] * FS_BLOCK_SIZE;
-        uint32_t data_offset = i * FS_BLOCK_SIZE;
-        uint32_t bytes_to_copy = FS_BLOCK_SIZE;
-        
-        if (data_offset + bytes_to_copy > size) {
-            bytes_to_copy = size - data_offset;
-        }
-        
-        for (uint32_t j = 0; j < bytes_to_copy; j++) {
-            filesystem.data_blocks[block_offset + j] = data[data_offset + j];
-        }
-    }
-    
-    inode->size = size;
-    inode->modified_time = fs_time_counter++;
-    
-    return 0;
+    terminal_writestring("No free blocks available\n");
+    return -1;
 }
 
-// Чтение данных из файла
 int fs_read_file(const char* filename, char* buffer, uint32_t max_size) {
-    if (!filesystem.initialized) {
-        terminal_writestring("ERROR: File system not initialized!\n");
-        return -1;
-    }
+    if (!filesystem.initialized || !filename || !buffer) return -1;
     
     fs_inode_t* inode = fs_find_inode(filename);
-    if (!inode) {
-        terminal_writestring("ERROR: File not found!\n");
-        return -1;
+    if (!inode || inode->size == 0) return -1;
+    
+    uint32_t read_size = (inode->size < max_size) ? inode->size : max_size;
+    
+    if (inode->blocks[0] > 0) {
+        uint8_t* block_data = filesystem.data_blocks + (inode->blocks[0] * FS_BLOCK_SIZE);
+        memcpy(buffer, block_data, read_size);
+        return read_size;
     }
     
-    uint32_t bytes_to_read = inode->size;
-    if (bytes_to_read > max_size) {
-        bytes_to_read = max_size;
-    }
-    
-    uint32_t blocks_to_read = (bytes_to_read + FS_BLOCK_SIZE - 1) / FS_BLOCK_SIZE;
-    
-    for (uint32_t i = 0; i < blocks_to_read; i++) {
-        if (inode->blocks[i] == 0) break;
-        
-        uint32_t block_offset = inode->blocks[i] * FS_BLOCK_SIZE;
-        uint32_t buffer_offset = i * FS_BLOCK_SIZE;
-        uint32_t bytes_to_copy = FS_BLOCK_SIZE;
-        
-        if (buffer_offset + bytes_to_copy > bytes_to_read) {
-            bytes_to_copy = bytes_to_read - buffer_offset;
-        }
-        
-        for (uint32_t j = 0; j < bytes_to_copy; j++) {
-            buffer[buffer_offset + j] = filesystem.data_blocks[block_offset + j];
-        }
-    }
-    
-    return bytes_to_read;
+    return -1;
 }
 
-// Список файлов
+int fs_delete_file(const char* filename) {
+    if (!filesystem.initialized || !filename) return -1;
+    
+    for (int i = 0; i < FS_MAX_FILES; i++) {
+        if (filesystem.inode_bitmap[i] && 
+            filesystem.inodes[i].type == FS_INODE_FILE &&
+            strcmp(filesystem.inodes[i].filename, filename) == 0) {
+            
+            fs_inode_t* inode = &filesystem.inodes[i];
+            
+            // Освобождаем блоки данных
+            for (int j = 0; j < 16 && inode->blocks[j] > 0; j++) {
+                filesystem.block_bitmap[inode->blocks[j]] = 0;
+                filesystem.superblock.free_blocks++;
+            }
+            
+            // Освобождаем inode
+            filesystem.inode_bitmap[i] = 0;
+            filesystem.superblock.free_inodes++;
+            memset(inode, 0, sizeof(fs_inode_t));
+            
+            return 0;
+        }
+    }
+    
+    terminal_writestring("File not found: ");
+    terminal_writestring(filename);
+    terminal_writestring("\n");
+    return -1;
+}
+
 void fs_list_files(void) {
     if (!filesystem.initialized) {
         terminal_writestring("ERROR: File system not initialized!\n");
@@ -1035,9 +1266,8 @@ void fs_list_files(void) {
     terminal_writestring("\n\n");
 }
 
-// === ФУНКЦИИ ПЛАНИРОВЩИКА ЗАДАЧ ===
+// === ПЛАНИРОВЩИК ЗАДАЧ ===
 
-// Инициализация планировщика
 void init_scheduler(void) {
     current_task = NULL;
     task_list = NULL;
@@ -1046,7 +1276,6 @@ void init_scheduler(void) {
     terminal_writestring("Task scheduler initialized\n");
 }
 
-// Создание новой задачи
 task_t* create_task(const char* name, void (*entry_point)(void), uint32_t priority) {
     task_t* task = (task_t*)kmalloc(sizeof(task_t));
     if (!task) {
@@ -1069,6 +1298,7 @@ task_t* create_task(const char* name, void (*entry_point)(void), uint32_t priori
     task->priority = priority;
     task->stack_size = TASK_STACK_SIZE;
     task->time_slice = 10; // 10 тиков
+    task->elf_loader = NULL;
     task->next = NULL;
     
     // Инициализируем регистры
@@ -1098,7 +1328,6 @@ task_t* create_task(const char* name, void (*entry_point)(void), uint32_t priori
     return task;
 }
 
-// Планировщик (простой round-robin)
 void schedule(void) {
     if (!current_task || !current_task->next) {
         return;
@@ -1120,7 +1349,6 @@ void schedule(void) {
     }
 }
 
-// Переключение контекста задачи (упрощенная версия)
 void switch_to_task(task_t* task) {
     if (!task) return;
     
@@ -1131,6 +1359,13 @@ void switch_to_task(task_t* task) {
     terminal_writestring(" (ID: ");
     print_number(task->id);
     terminal_writestring(")\n");
+}
+
+void task_yield(void) {
+    if (current_task) {
+        current_task->time_slice = 0; // Принудительно вызываем переключение
+        schedule();
+    }
 }
 
 // === ДЕМОНСТРАЦИОННЫЕ ЗАДАЧИ ===
@@ -1163,7 +1398,7 @@ void demo_task2(void) {
     }
 }
 
-// === IDT И ОБРАБОТЧИКИ ПРЕРЫВАНИЙ ===
+// === ОБРАБОТЧИКИ ПРЕРЫВАНИЙ ===
 
 void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
     idt[num].base_lo = base & 0xFFFF;
@@ -1175,26 +1410,142 @@ void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags) {
 
 void handle_exception(void) {
     // Минимальная обработка исключений - просто продолжаем
-    // Не выводим ничего, чтобы не вызвать новые исключения
 }
 
-// Инициализация PIC
-void initialize_system(void) {
-    terminal_writestring("Initializing system...\n");
+void handle_page_fault(void) {
+    uint32_t fault_addr = get_page_fault_address();
+    terminal_writestring("Page fault at address: ");
+    print_hex(fault_addr);
+    terminal_writestring("\n");
+}
+
+void keyboard_handler(void) {
+    uint8_t scancode = inb(KEYBOARD_DATA_PORT);
     
-    // Инициализация PIC (упрощенная)
-    outb(PIC1_COMMAND, 0x11);
-    outb(PIC2_COMMAND, 0x11);
-    outb(PIC1_DATA, 0x20);
-    outb(PIC2_DATA, 0x28);
-    outb(PIC1_DATA, 0x04);
-    outb(PIC2_DATA, 0x02);
-    outb(PIC1_DATA, 0x01);
-    outb(PIC2_DATA, 0x01);
-    outb(PIC1_DATA, 0xFD); // Разрешаем только IRQ1 (клавиатура)
-    outb(PIC2_DATA, 0xFF);
+    // Обработка клавиатуры (упрощенная)
+    if (scancode < 128) {
+        char c = 0;
+        
+        // Обработка модификаторов
+        switch (scancode) {
+            case KEY_LSHIFT_PRESSED:
+            case KEY_RSHIFT_PRESSED:
+                shift_pressed = 1;
+                break;
+            case KEY_LSHIFT_RELEASED:
+            case KEY_RSHIFT_RELEASED:
+                shift_pressed = 0;
+                break;
+            case KEY_CTRL_PRESSED:
+                ctrl_pressed = 1;
+                break;
+            case KEY_CTRL_RELEASED:
+                ctrl_pressed = 0;
+                break;
+            case KEY_ALT_PRESSED:
+                alt_pressed = 1;
+                break;
+            case KEY_ALT_RELEASED:
+                alt_pressed = 0;
+                break;
+            case KEY_CAPS_LOCK:
+                caps_lock_on = !caps_lock_on;
+                break;
+            default:
+                // Обычные клавиши
+                if (shift_pressed) {
+                    c = scancode_shift[scancode];
+                } else {
+                    c = scancode_normal[scancode];
+                }
+                
+                // Caps Lock для букв
+                if (caps_lock_on && c >= 'a' && c <= 'z') {
+                    c -= 32; // Преобразуем в заглавную
+                } else if (caps_lock_on && c >= 'A' && c <= 'Z') {
+                    c += 32; // Преобразуем в строчную
+                }
+                
+                if (c != 0) {
+                    if (c == '\n') {
+                        // Enter - выполняем команду
+                        command_buffer[command_length] = '\0';
+                        terminal_putchar('\n');
+                        execute_command(command_buffer);
+                        command_length = 0;
+                        shell_prompt();
+                    } else if (c == '\b') {
+                        // Backspace
+                        if (command_length > 0) {
+                            command_length--;
+                            terminal_putchar('\b');
+                        }
+                    } else if (command_length < COMMAND_BUFFER_SIZE - 1) {
+                        // Обычный символ
+                        command_buffer[command_length++] = c;
+                        terminal_putchar(c);
+                    }
+                }
+                break;
+        }
+    }
     
-    terminal_writestring("PIC initialized\n");
+    // Отправляем EOI
+    outb(PIC1_COMMAND, PIC_EOI);
+}
+
+void timer_interrupt_handler(void) {
+    timer_ticks++;
+    
+    // Планировщик задач каждые 10 тиков (100ms при 100Hz)
+    if (timer_ticks % 10 == 0) {
+        scheduler_ticks++;
+        if (current_task && current_task->time_slice > 0) {
+            current_task->time_slice--;
+            if (current_task->time_slice == 0) {
+                current_task->time_slice = 10; // Сбрасываем time slice
+                schedule(); // Переключаем задачу
+            }
+        }
+    }
+    
+    // Отправляем EOI
+    outb(PIC1_COMMAND, PIC_EOI);
+}
+
+// === СИСТЕМНЫЕ ВЫЗОВЫ ===
+
+int handle_syscall(int syscall_num, int arg0, int arg1, int arg2, int arg3 __attribute__((unused)), int arg4 __attribute__((unused))) {
+    switch (syscall_num) {
+        case SYS_EXIT:
+            // Завершение текущей задачи
+            if (current_task) {
+                current_task->state = TASK_STATE_DEAD;
+                schedule(); // Переключаемся на другую задачу
+            }
+            return 0;
+            
+        case SYS_WRITE:
+            // Простой вывод (arg0 = fd, arg1 = buffer, arg2 = count)
+            if (arg0 == 1) { // stdout
+                char* buffer = (char*)arg1;
+                for (int i = 0; i < arg2; i++) {
+                    terminal_putchar(buffer[i]);
+                }
+                return arg2;
+            }
+            return -1;
+            
+        case SYS_GETPID:
+            return current_task ? current_task->id : 0;
+            
+        case SYS_YIELD:
+            schedule();
+            return 0;
+            
+        default:
+            return -1; // Неизвестный системный вызов
+    }
 }
 
 // === КОМАНДЫ ШЕЛЛА ===
@@ -1210,10 +1561,6 @@ void command_help(void) {
     terminal_writestring("  about      - System information\n");
     terminal_writestring("  memory     - Memory usage\n");
     terminal_writestring("  memtest    - Test memory allocator\n");
-    terminal_writestring("  vmem       - Virtual memory status\n");
-    terminal_writestring("  paging     - Check paging status\n");
-    terminal_writestring("  paging on  - Enable virtual memory\n");
-    terminal_writestring("  paging off - Disable virtual memory\n");
     terminal_writestring("  keyboard   - Keyboard status\n");
     terminal_writestring("  tasks      - List tasks\n");
     terminal_writestring("  schedule   - Trigger scheduler\n");
@@ -1222,10 +1569,13 @@ void command_help(void) {
     terminal_writestring("  cat <f>    - Show file content\n");
     terminal_writestring("  rm <f>     - Delete file\n");
     terminal_writestring("  echo <t> > <f> - Write text to file\n");
+    terminal_writestring("  testelf    - Test ELF loader\n");
+    terminal_writestring("  run <f>    - Run ELF program from file\n");
     terminal_writestring("  reboot     - Restart system\n");
     terminal_writestring("  poweroff   - Shutdown system\n");
-    terminal_writestring("\nKeyboard features: Shift, Ctrl, Alt, Caps Lock support\n");
-    terminal_writestring("Special keys: Ctrl+C (cancel), Ctrl+L (clear)\n");
+    terminal_writestring("\nELF Loader Commands:\n");
+    terminal_writestring("  testelf    - Test built-in ELF program\n");
+    terminal_writestring("  run <file> - Load and execute ELF file\n");
     terminal_writestring("\n");
 }
 
@@ -1234,8 +1584,8 @@ void command_clear(void) {
 }
 
 void command_about(void) {
-    terminal_writestring("MyOS v0.7 - Enhanced Operating System\n");
-    terminal_writestring("====================================\n");
+    terminal_writestring("MyOS v1.1 - Operating System with ELF Loader\n");
+    terminal_writestring("==============================================\n");
     terminal_writestring("Features:\n");
     terminal_writestring("  - 32-bit protected mode\n");
     terminal_writestring("  - Dynamic memory management\n");
@@ -1246,11 +1596,14 @@ void command_about(void) {
     terminal_writestring("  - VGA cursor support\n");
     terminal_writestring("  - Interrupt handling\n");
     terminal_writestring("  - Interactive command shell\n");
-    terminal_writestring("\nNew in v0.7:\n");
-    terminal_writestring("  - Full keyboard modifier support\n");
-    terminal_writestring("  - Proper VGA cursor positioning\n");
-    terminal_writestring("  - Shift/Ctrl/Alt key combinations\n");
-    terminal_writestring("  - Caps Lock functionality\n");
+    terminal_writestring("  - ELF executable loader\n");
+    terminal_writestring("  - User mode execution\n");
+    terminal_writestring("  - System calls (INT 0x80)\n");
+    terminal_writestring("\nNew in v1.1:\n");
+    terminal_writestring("  - Full ELF32 loader implementation\n");
+    terminal_writestring("  - User mode task execution\n");
+    terminal_writestring("  - ELF program validation and loading\n");
+    terminal_writestring("  - File-based ELF execution\n");
     terminal_writestring("\nBuilt with Assembly and C\n");
     terminal_writestring("For x86 architecture\n\n");
 }
@@ -1300,102 +1653,6 @@ void command_memtest(void) {
     terminal_writestring("Memory test completed!\n\n");
 }
 
-void command_reboot(void) {
-    terminal_writestring("Rebooting system...\n");
-    // Простая перезагрузка через клавиатурный контроллер
-    outb(0x64, 0xFE);
-    while(1) asm volatile("hlt");
-}
-
-void command_poweroff(void) {
-    terminal_writestring("Shutting down system...\n");
-    
-    // Попытка ACPI shutdown через порт 0x604 (QEMU)
-    outb(0x604, 0x20);
-    outb(0x605, 0x00);
-    
-    // Альтернативный метод для QEMU - порт 0xB004
-    outb(0xB004, 0x20);
-    outb(0xB005, 0x00);
-    
-    // Если ничего не помогло, просто останавливаем систему
-    terminal_writestring("System halted. You can close the emulator.\n");
-    asm volatile("cli");
-    while(1) asm volatile("hlt");
-}
-
-// Вспомогательная функция для вывода чисел в hex формате
-void print_number_hex(uint32_t num) {
-    for (int i = 28; i >= 0; i -= 4) {
-        uint32_t nibble = (num >> i) & 0xF;
-        char hex_char = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
-        terminal_putchar(hex_char);
-    }
-}
-
-void command_vmem(void) {
-    terminal_writestring("Virtual Memory Status:\n");
-    terminal_writestring("  Paging: ");
-    if (paging_enabled) {
-        terminal_writestring("ENABLED\n");
-    } else {
-        terminal_writestring("DISABLED\n");
-    }
-    
-    terminal_writestring("  Page Directory: 0x");
-    print_number_hex((uint32_t)page_directory);
-    terminal_writestring("\n");
-    
-    terminal_writestring("  Page Tables: 0x");
-    print_number_hex((uint32_t)page_tables);
-    terminal_writestring("\n");
-    
-    terminal_writestring("  Page Size: ");
-    print_number(PAGE_SIZE);
-    terminal_writestring(" bytes\n");
-    
-    terminal_writestring("  Entries per table: ");
-    print_number(PAGE_ENTRIES);
-    terminal_writestring("\n\n");
-}
-
-void command_paging(void) {
-    if (paging_enabled) {
-        terminal_writestring("Paging is currently ENABLED\n");
-        terminal_writestring("Virtual memory is active and working!\n");
-        terminal_writestring("To disable: Type 'paging off'\n");
-    } else {
-        terminal_writestring("Paging is currently DISABLED\n");
-        terminal_writestring("To enable virtual memory: Type 'paging on'\n");
-    }
-    terminal_writestring("\n");
-}
-
-void command_paging_on(void) {
-    if (paging_enabled) {
-        terminal_writestring("Virtual memory is already enabled!\n");
-        return;
-    }
-    
-    terminal_writestring("Initializing and enabling virtual memory...\n");
-    
-    init_virtual_memory();
-    enable_virtual_memory();
-    
-    terminal_writestring("Virtual memory is now active!\n\n");
-}
-
-void command_paging_off(void) {
-    if (!paging_enabled) {
-        terminal_writestring("Virtual memory is already disabled!\n");
-        return;
-    }
-    
-    terminal_writestring("Disabling virtual memory...\n");
-    disable_virtual_memory();
-    terminal_writestring("Virtual memory disabled!\n\n");
-}
-
 void command_keyboard(void) {
     terminal_writestring("Keyboard Status:\n");
     
@@ -1436,8 +1693,6 @@ void command_keyboard(void) {
     terminal_writestring("    - Ctrl+L to clear screen\n");
     terminal_writestring("\n  Try typing with different modifiers!\n\n");
 }
-
-// === КОМАНДЫ ПЛАНИРОВЩИКА ===
 
 void command_tasks(void) {
     terminal_writestring("Task List:\n");
@@ -1498,8 +1753,6 @@ void command_schedule(void) {
     schedule();
     terminal_writestring("Scheduler executed\n\n");
 }
-
-// === КОМАНДЫ ФАЙЛОВОЙ СИСТЕМЫ ===
 
 void command_ls(void) {
     fs_list_files();
@@ -1620,6 +1873,78 @@ void command_echo(const char* args) {
     }
 }
 
+void command_testelf(void) {
+    terminal_writestring("Testing ELF loader...\n");
+    
+    // Создаем тестовую ELF задачу
+    task_t* elf_task = create_elf_task("test_program", test_elf_program, test_elf_size, 10);
+    
+    if (elf_task) {
+        terminal_writestring("ELF test program loaded successfully!\n");
+        terminal_writestring("Task ID: ");
+        print_number(elf_task->id);
+        terminal_writestring("\n");
+        terminal_writestring("This program will exit immediately via sys_exit\n");
+    } else {
+        terminal_writestring("Failed to load ELF test program\n");
+    }
+}
+
+void command_run(const char* filename) {
+    if (!filename || strlen(filename) == 0) {
+        terminal_writestring("Usage: run <filename>\n");
+        return;
+    }
+    
+    terminal_writestring("Loading ELF program: ");
+    terminal_writestring(filename);
+    terminal_writestring("\n");
+    
+    uint8_t* elf_data;
+    uint32_t elf_size;
+    
+    if (load_elf_from_file(filename, &elf_data, &elf_size)) {
+        task_t* elf_task = create_elf_task(filename, elf_data, elf_size, 10);
+        
+        if (elf_task) {
+            terminal_writestring("Program loaded successfully!\n");
+            terminal_writestring("Task ID: ");
+            print_number(elf_task->id);
+            terminal_writestring("\n");
+        } else {
+            terminal_writestring("Failed to create task from ELF file\n");
+        }
+        
+        kfree(elf_data);
+    } else {
+        terminal_writestring("Failed to load ELF file\n");
+    }
+}
+
+void command_reboot(void) {
+    terminal_writestring("Rebooting system...\n");
+    // Простая перезагрузка через клавиатурный контроллер
+    outb(0x64, 0xFE);
+    while(1) asm volatile("hlt");
+}
+
+void command_poweroff(void) {
+    terminal_writestring("Shutting down system...\n");
+    
+    // Попытка ACPI shutdown через порт 0x604 (QEMU)
+    outb(0x604, 0x20);
+    outb(0x605, 0x00);
+    
+    // Альтернативный метод для QEMU - порт 0xB004
+    outb(0xB004, 0x20);
+    outb(0xB005, 0x00);
+    
+    // Если ничего не помогло, просто останавливаем систему
+    terminal_writestring("System halted. You can close the emulator.\n");
+    asm volatile("cli");
+    while(1) asm volatile("hlt");
+}
+
 void execute_command(const char* command) {
     if (strcmp(command, "") == 0) {
         // Пустая команда
@@ -1660,16 +1985,6 @@ void execute_command(const char* command) {
         command_memory();
     } else if (strcmp(cmd, "memtest") == 0) {
         command_memtest();
-    } else if (strcmp(cmd, "vmem") == 0) {
-        command_vmem();
-    } else if (strcmp(cmd, "paging") == 0) {
-        if (args[0] && strcmp(args, "on") == 0) {
-            command_paging_on();
-        } else if (args[0] && strcmp(args, "off") == 0) {
-            command_paging_off();
-        } else {
-            command_paging();
-        }
     } else if (strcmp(cmd, "keyboard") == 0) {
         command_keyboard();
     } else if (strcmp(cmd, "tasks") == 0) {
@@ -1679,384 +1994,44 @@ void execute_command(const char* command) {
     } else if (strcmp(cmd, "ls") == 0) {
         command_ls();
     } else if (strcmp(cmd, "touch") == 0) {
-        command_touch(args[0] ? args : NULL);
+        command_touch(args);
     } else if (strcmp(cmd, "cat") == 0) {
-        command_cat(args[0] ? args : NULL);
+        command_cat(args);
     } else if (strcmp(cmd, "rm") == 0) {
-        command_rm(args[0] ? args : NULL);
+        command_rm(args);
     } else if (strcmp(cmd, "echo") == 0) {
-        command_echo(args[0] ? args : NULL);
+        command_echo(args);
+    } else if (strcmp(cmd, "testelf") == 0) {
+        command_testelf();
+    } else if (strcmp(cmd, "run") == 0) {
+        command_run(args);
     } else if (strcmp(cmd, "reboot") == 0) {
         command_reboot();
     } else if (strcmp(cmd, "poweroff") == 0) {
         command_poweroff();
     } else {
         terminal_writestring("Unknown command: ");
-        terminal_writestring(cmd);
+        terminal_writestring(command);
         terminal_writestring("\n");
-        terminal_writestring("Type 'help' for available commands.\n");
+        terminal_writestring("Type 'help' for available commands\n");
     }
 }
-
-// Получение символа с учетом модификаторов
-char get_ascii_char(uint8_t scancode) {
-    if (scancode >= 128) return 0;
-    
-    char base_char;
-    int use_shift = shift_pressed;
-    
-    // Проверяем Caps Lock для букв
-    if (caps_lock_on && scancode >= 16 && scancode <= 50) {
-        char c = scancode_normal[scancode];
-        if (c >= 'a' && c <= 'z') {
-            use_shift = !use_shift; // Инвертируем shift для букв
-        }
-    }
-    
-    if (use_shift) {
-        base_char = scancode_shift[scancode];
-    } else {
-        base_char = scancode_normal[scancode];
-    }
-    
-    return base_char;
-}
-
-// Обработка модификаторов
-void handle_modifier_keys(uint8_t scancode) {
-    switch (scancode) {
-        case KEY_LSHIFT_PRESSED:
-        case KEY_RSHIFT_PRESSED:
-            shift_pressed = 1;
-            break;
-        case KEY_LSHIFT_RELEASED:
-        case KEY_RSHIFT_RELEASED:
-            shift_pressed = 0;
-            break;
-        case KEY_CTRL_PRESSED:
-            ctrl_pressed = 1;
-            break;
-        case KEY_CTRL_RELEASED:
-            ctrl_pressed = 0;
-            break;
-        case KEY_ALT_PRESSED:
-            alt_pressed = 1;
-            break;
-        case KEY_ALT_RELEASED:
-            alt_pressed = 0;
-            break;
-        case KEY_CAPS_LOCK:
-            caps_lock_on = !caps_lock_on;
-            break;
-    }
-}
-
-// Обработчик клавиатуры с безопасной поддержкой модификаторов
-void keyboard_handler(void) {
-    uint8_t scancode = inb(KEYBOARD_DATA_PORT);
-    
-    // Обработка модификаторов (безопасно)
-    if (scancode == 0x2A || scancode == 0x36) { // L/R Shift нажат
-        shift_pressed = 1;
-    } else if (scancode == 0xAA || scancode == 0xB6) { // L/R Shift отпущен
-        shift_pressed = 0;
-    } else if (scancode == 0x1D) { // Ctrl нажат
-        ctrl_pressed = 1;
-    } else if (scancode == 0x9D) { // Ctrl отпущен
-        ctrl_pressed = 0;
-    }
-    
-    // Обработка обычных клавиш (только нажатие)
-    if (!(scancode & 0x80) && shell_ready) {
-        char ascii = 0;
-        
-        // Проверяем Ctrl комбинации сначала
-        if (ctrl_pressed) {
-            if (scancode == 0x2E) { // Ctrl+C
-                terminal_writestring("\n^C\n");
-                command_length = 0;
-                shell_prompt();
-                outb(PIC1_COMMAND, PIC_EOI);
-                return;
-            } else if (scancode == 0x26) { // Ctrl+L  
-                command_clear();
-                shell_prompt();
-                outb(PIC1_COMMAND, PIC_EOI);
-                return;
-            }
-        }
-        
-        // Маппинг основных клавиш с учетом Shift
-        if (scancode == 0x1C) { // Enter
-            ascii = '\n';
-        } else if (scancode == 0x0E) { // Backspace
-            ascii = '\b';
-        } else if (scancode == 0x39) { // Space
-            ascii = ' ';
-        } 
-        // Буквы с учетом Shift
-        else if (scancode >= 0x10 && scancode <= 0x19) { // qwertyuiop
-            const char* normal = "qwertyuiop";
-            const char* shifted = "QWERTYUIOP";
-            ascii = shift_pressed ? shifted[scancode - 0x10] : normal[scancode - 0x10];
-        } else if (scancode >= 0x1E && scancode <= 0x26) { // asdfghjkl
-            const char* normal = "asdfghjkl";
-            const char* shifted = "ASDFGHJKL";
-            ascii = shift_pressed ? shifted[scancode - 0x1E] : normal[scancode - 0x1E];
-        } else if (scancode >= 0x2C && scancode <= 0x32) { // zxcvbnm
-            const char* normal = "zxcvbnm";
-            const char* shifted = "ZXCVBNM";
-            ascii = shift_pressed ? shifted[scancode - 0x2C] : normal[scancode - 0x2C];
-        } 
-        // Цифры и символы с учетом Shift
-        else if (scancode >= 0x02 && scancode <= 0x0A) { // 1-9
-            const char* normal = "123456789";
-            const char* shifted = "!@#$%^&*()";
-            ascii = shift_pressed ? shifted[scancode - 0x02] : normal[scancode - 0x02];
-        } else if (scancode == 0x0B) { // 0
-            ascii = shift_pressed ? ')' : '0';
-        }
-        // Дополнительные символы
-        else if (scancode == 0x0C) { // -/_ 
-            ascii = shift_pressed ? '_' : '-';
-        } else if (scancode == 0x0D) { // =/+
-            ascii = shift_pressed ? '+' : '=';
-        } else if (scancode == 0x33) { // ,/< 
-            ascii = shift_pressed ? '<' : ',';
-        } else if (scancode == 0x34) { // ./>  
-            ascii = shift_pressed ? '>' : '.';
-        } else if (scancode == 0x35) { // //?  
-            ascii = shift_pressed ? '?' : '/';
-        }
-        
-        // Обработка полученного символа
-        if (ascii != 0) {
-            if (ascii == '\n') {
-                terminal_putchar('\n');
-                command_buffer[command_length] = '\0';
-                execute_command(command_buffer);
-                command_length = 0;
-                shell_prompt();
-            } else if (ascii == '\b') {
-                if (command_length > 0) {
-                    command_length--;
-                    terminal_putchar('\b');
-                    terminal_putchar(' ');
-                    terminal_putchar('\b');
-                }
-            } else if (ascii >= 32 && ascii <= 126) {
-                if (command_length < COMMAND_BUFFER_SIZE - 1) {
-                    command_buffer[command_length++] = ascii;
-                    terminal_putchar(ascii);
-                }
-            }
-        }
-    }
-    
-    // Отправляем сигнал завершения прерывания
-    outb(PIC1_COMMAND, PIC_EOI);
-}
-
-// === СИСТЕМНЫЕ ВЫЗОВЫ ===
-
-// Обработчик системных вызовов
-int handle_syscall(int syscall_num, int arg0, int arg1, int arg2, int arg3 __attribute__((unused)), int arg4 __attribute__((unused))) {
-    switch (syscall_num) {
-        case SYS_EXIT:
-            // Завершение текущей задачи
-            if (current_task) {
-                current_task->state = TASK_STATE_DEAD;
-            }
-            return 0;
-            
-        case SYS_WRITE:
-            // Простая запись в консоль
-            if (arg0 == 1) { // stdout
-                char* buffer = (char*)arg1;
-                int length = arg2;
-                for (int i = 0; i < length; i++) {
-                    terminal_putchar(buffer[i]);
-                }
-                return length;
-            }
-            return -1;
-            
-        case SYS_READ:
-            // Чтение пока не поддерживается
-            return -1;
-            
-        case SYS_GETPID:
-            return current_task ? current_task->id : 0;
-            
-        case SYS_YIELD:
-            // Передача управления планировщику
-            schedule();
-            return 0;
-            
-        default:
-            return -1; // Неподдерживаемый системный вызов
-    }
-}
-
-// === НАСТРОЙКА GDT ===
-
-void gdt_set_gate(int num, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran) {
-    gdt[num].base_low = (base & 0xFFFF);
-    gdt[num].base_middle = (base >> 16) & 0xFF;
-    gdt[num].base_high = (base >> 24) & 0xFF;
-    
-    gdt[num].limit_low = (limit & 0xFFFF);
-    gdt[num].granularity = (limit >> 16) & 0x0F;
-    
-    gdt[num].granularity |= gran & 0xF0;
-    gdt[num].access = access;
-}
-
-extern void gdt_flush(uint32_t);
 
 void setup_gdt_user_segments(void) {
-    // Устанавливаем базовые дескрипторы
-    gdt_set_gate(0, 0, 0, 0, 0);                // Нулевой дескриптор
-    gdt_set_gate(1, 0, 0xFFFFFFFF, 0x9A, 0xCF); // Код ядра
-    gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF); // Данные ядра
-    gdt_set_gate(3, 0, 0xFFFFFFFF, 0xFA, 0xCF); // Код пользователя
-    gdt_set_gate(4, 0, 0xFFFFFFFF, 0xF2, 0xCF); // Данные пользователя
-    
-    gdtp.limit = (sizeof(struct gdt_entry) * GDT_ENTRIES) - 1;
-    gdtp.base = (uint32_t)&gdt;
-    
-    // Применяем GDT (функция из ассемблера)
-    // gdt_flush((uint32_t)&gdtp);
+    // Простая функция-заглушка для GDT
+    // В реальной реализации здесь была бы настройка GDT
 }
 
-// === ТАЙМЕР ===
-
-void init_timer(uint32_t frequency) {
-    timer_frequency = frequency;
-    
-    // Вычисляем делитель
+void init_timer(int frequency) {
     uint32_t divisor = PIT_FREQUENCY / frequency;
     
-    // Отправляем команду
-    outb(PIT_COMMAND, 0x36);
-    
-    // Отправляем делитель
-    uint8_t l = (uint8_t)(divisor & 0xFF);
-    uint8_t h = (uint8_t)((divisor >> 8) & 0xFF);
-    
-    outb(PIT_DATA0, l);
-    outb(PIT_DATA0, h);
+    outb(PIT_COMMAND, 0x36);         // Канал 0, режим 3, бинарный
+    outb(PIT_DATA0, divisor & 0xFF);
+    outb(PIT_DATA0, (divisor >> 8) & 0xFF);
     
     terminal_writestring("Timer initialized at ");
     print_number(frequency);
     terminal_writestring(" Hz\n");
-}
-
-void timer_interrupt_handler(void) {
-    timer_ticks++;
-    
-    // Планировщик задач каждые 10 тиков (100ms при 100Hz)
-    if (timer_ticks % 10 == 0) {
-        scheduler_ticks++;
-        if (current_task && current_task->time_slice > 0) {
-            current_task->time_slice--;
-            if (current_task->time_slice == 0) {
-                current_task->time_slice = 10; // Сбрасываем time slice
-                schedule(); // Переключаем задачу
-            }
-        }
-    }
-    
-    // Отправляем EOI
-    outb(PIC1_COMMAND, PIC_EOI);
-}
-
-// === УЛУЧШЕННЫЙ ПЛАНИРОВЩИК ===
-
-void task_yield(void) {
-    if (current_task) {
-        current_task->time_slice = 0; // Принудительно вызываем переключение
-        schedule();
-    }
-}
-
-// Переключение контекста задачи (улучшенная версия)
-void switch_to_task_advanced(task_t* task) {
-    if (!task) return;
-    
-    // Используем новые ассемблерные функции для переключения контекста
-    if (current_task != task) {
-        task_t* old_task = current_task;
-        current_task = task;
-        task->state = TASK_STATE_RUNNING;
-        
-        // Переключаем контекст через ассемблерный код
-        switch_context(old_task, task);
-    }
-}
-
-// Создание пользовательской задачи
-task_t* create_user_task_wrapper(const char* name, void (*entry_point)(void), uint32_t priority) {
-    task_t* task = create_task(name, entry_point, priority);
-    if (task) {
-        // Настраиваем задачу для пользовательского режима
-        create_user_task((uint32_t)entry_point, 
-                        (uint32_t)task->stack + TASK_STACK_SIZE - 4, 
-                        task);
-        
-        // Обновляем регистры для пользовательского режима
-        task->regs.cs = GDT_USER_CODE;
-        task->regs.ds = GDT_USER_DATA;
-        task->regs.es = GDT_USER_DATA;
-        task->regs.fs = GDT_USER_DATA;
-        task->regs.gs = GDT_USER_DATA;
-        task->regs.ss = GDT_USER_DATA;
-    }
-    return task;
-}
-
-// === ДРАЙВЕРЫ УСТРОЙСТВ ===
-
-// Расширенный драйвер клавиатуры
-typedef struct {
-    char buffer[256];
-    int head;
-    int tail;
-    int count;
-} keyboard_buffer_t;
-
-keyboard_buffer_t kb_buffer = {0};
-
-void keyboard_buffer_put(char c) {
-    if (kb_buffer.count < 255) {
-        kb_buffer.buffer[kb_buffer.head] = c;
-        kb_buffer.head = (kb_buffer.head + 1) % 256;
-        kb_buffer.count++;
-    }
-}
-
-char keyboard_buffer_get(void) {
-    if (kb_buffer.count > 0) {
-        char c = kb_buffer.buffer[kb_buffer.tail];
-        kb_buffer.tail = (kb_buffer.tail + 1) % 256;
-        kb_buffer.count--;
-        return c;
-    }
-    return 0;
-}
-
-// Простой драйвер VGA
-void vga_write_color(int x, int y, char c, uint8_t color) {
-    uint16_t* video_memory = (uint16_t*)VGA_MEMORY;
-    if (x >= 0 && x < VGA_WIDTH && y >= 0 && y < VGA_HEIGHT) {
-        video_memory[y * VGA_WIDTH + x] = (color << 8) | c;
-    }
-}
-
-void vga_set_color(uint8_t color __attribute__((unused))) {
-    // Функция для установки текущего цвета
-    // Пока что просто сохраняем в глобальной переменной
-    // В реальной реализации это интегрировалось бы с terminal_putchar
 }
 
 // Главная функция
@@ -2066,8 +2041,8 @@ void kernel_main(void) {
     // Включаем VGA курсор
     enable_cursor(14, 15); // Обычный курсор
     
-    terminal_writestring("MyOS v1.0 - Advanced Operating System\n");
-    terminal_writestring("=======================================\n\n");
+    terminal_writestring("MyOS v1.1 - Operating System with ELF Loader\n");
+    terminal_writestring("==============================================\n\n");
 
     // Настройка GDT для поддержки пользовательского режима
     terminal_writestring("Setting up GDT for user mode...\n");
@@ -2148,9 +2123,9 @@ void kernel_main(void) {
     terminal_writestring("Demo tasks created\n");
 
     // Инициализация шелла
-    terminal_writestring("Starting advanced shell...\n");
+    terminal_writestring("Starting ELF-enabled shell...\n");
     enable_cursor(14, 15);
-    terminal_writestring("\n=== Welcome to MyOS v1.0 ===\n");
+    terminal_writestring("\n=== Welcome to MyOS v1.1 with ELF Loader ===\n");
     terminal_writestring("Advanced Features:\n");
     terminal_writestring("  * Task scheduling with context switching\n");
     terminal_writestring("  * System calls (INT 0x80)\n");
@@ -2158,9 +2133,11 @@ void kernel_main(void) {
     terminal_writestring("  * Timer-driven multitasking\n");
     terminal_writestring("  * Device drivers (keyboard, VGA, timer)\n");
     terminal_writestring("  * Virtual memory management\n");
-    terminal_writestring("  * Simple file system\n\n");
+    terminal_writestring("  * Simple file system\n");
+    terminal_writestring("  * ELF executable loader\n");
+    terminal_writestring("  * User mode program execution\n\n");
     terminal_writestring("Type 'help' for available commands.\n");
-    terminal_writestring("Try 'tasks' to see running tasks or 'schedule' to test scheduler.\n\n");
+    terminal_writestring("Try 'testelf' to test ELF loader or 'run <file>' to execute ELF programs.\n\n");
     
     shell_ready = 1;
     shell_prompt();

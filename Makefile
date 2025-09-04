@@ -66,12 +66,14 @@ $(KERNEL_BIN): $(OBJECTS)
 
 # Создание конфигурации GRUB
 grub-config:
-	@echo 'menuentry "MyOS" {' > $(ISO_DIR)/boot/grub/grub.cfg
+	@mkdir -p $(ISO_DIR)/boot/grub
+	@echo 'menuentry "MyOS with ELF Loader" {' > $(ISO_DIR)/boot/grub/grub.cfg
 	@echo '    multiboot /boot/myos.bin' >> $(ISO_DIR)/boot/grub/grub.cfg
 	@echo '}' >> $(ISO_DIR)/boot/grub/grub.cfg
 
 # Создание ISO образа
 $(ISO_FILE): $(KERNEL_BIN) grub-config
+	@mkdir -p $(ISO_DIR)/boot
 	cp $(KERNEL_BIN) $(ISO_DIR)/boot/myos.bin
 	grub-mkrescue -o $(ISO_FILE) $(ISO_DIR)
 
@@ -101,17 +103,19 @@ rebuild: clean all
 
 # Показать структуру проекта
 tree:
-	@echo "Структура проекта MyOS:"
+	@echo "Структура проекта MyOS с ELF-загрузчиком:"
 	@echo "├── src/"
 	@echo "│   ├── boot/"
 	@echo "│   │   └── boot.asm          # Загрузчик с Multiboot заголовком"
 	@echo "│   ├── kernel/"
-	@echo "│   │   ├── kernel.c          # Основной код ядра"
+	@echo "│   │   ├── kernel.c          # Основной код ядра с ELF-загрузчиком"
 	@echo "│   │   ├── interrupts.asm    # Обработчики прерываний"
 	@echo "│   │   ├── context.asm       # Переключение контекста задач"
 	@echo "│   │   ├── syscalls.asm      # Системные вызовы"
 	@echo "│   │   └── usermode.asm      # Поддержка пользовательского режима"
-	@echo "│   ├── include/              # Заголовочные файлы"
+	@echo "│   ├── include/"
+	@echo "│   │   ├── elf.h             # Определения ELF структур"
+	@echo "│   │   └── types.h           # Базовые типы данных"
 	@echo "│   └── linker.ld             # Скрипт компоновщика"
 	@echo "├── build/                    # Директория сборки"
 	@echo "│   ├── *.o                   # Объектные файлы"
@@ -126,8 +130,8 @@ tree:
 
 # Информация о сборке
 info:
-	@echo "MyOS Build System"
-	@echo "=================="
+	@echo "MyOS с ELF-загрузчиком - Build System"
+	@echo "====================================="
 	@echo "Исходники:"
 	@echo "  Boot:       $(BOOT_ASM)"
 	@echo "  Interrupts: $(INTERRUPTS_ASM)"
