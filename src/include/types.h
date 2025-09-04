@@ -20,10 +20,17 @@ typedef uint32_t       uintptr_t;
 typedef int32_t        intptr_t;
 
 // Boolean type
+#ifndef __cplusplus
+#ifndef bool
 typedef enum {
-    false = 0,
-    true = 1
-} bool;
+    FALSE = 0,
+    TRUE = 1
+} bool_t;
+#define bool bool_t
+#define false FALSE
+#define true TRUE
+#endif
+#endif
 
 // NULL definition
 #ifndef NULL
