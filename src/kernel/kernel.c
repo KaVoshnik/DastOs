@@ -1469,7 +1469,7 @@ void command_clear(void) {
 }
 
 void command_about(void) {
-    terminal_writestring("MyOS v1.1 - Operating System with ELF Loader\n");
+    terminal_writestring("MyOS v0.7 - Operating System with ELF Loader\n");
     terminal_writestring("==============================================\n");
     terminal_writestring("Features:\n");
     terminal_writestring("  - 32-bit protected mode\n");
@@ -1484,7 +1484,7 @@ void command_about(void) {
     terminal_writestring("  - ELF executable loader\n");
     terminal_writestring("  - User mode execution\n");
     terminal_writestring("  - System calls (INT 0x80)\n");
-    terminal_writestring("\nNew in v1.1:\n");
+    terminal_writestring("\nNew in v0.7:\n");
     terminal_writestring("  - Full ELF32 loader implementation\n");
     terminal_writestring("  - User mode task execution\n");
     terminal_writestring("  - ELF program validation and loading\n");
@@ -1539,7 +1539,7 @@ void command_memtest(void) {
 }
 
 void command_keyboard(void) {
-    terminal_writestring("Keyboard Status (v2.0):\n");
+    terminal_writestring("Keyboard Status (v0.7):\n");
     
     uint8_t modifiers = keyboard_get_modifiers();
     keyboard_state_t* state = keyboard_get_state();
@@ -1583,7 +1583,7 @@ void command_keyboard(void) {
         terminal_writestring("None\n");
     }
     
-    terminal_writestring("\n  New Features v2.0:\n");
+    terminal_writestring("\n  New Features v0.7:\n");
     terminal_writestring("    - Extended key support (F1-F12, arrows, etc.)\n");
     terminal_writestring("    - E0-prefixed scancodes\n");
     terminal_writestring("    - Event-driven architecture\n");
@@ -1939,7 +1939,7 @@ void kernel_main(void) {
     // Включаем VGA курсор
     enable_cursor(14, 15); // Обычный курсор
     
-    terminal_writestring("MyOS v1.1 - Operating System with ELF Loader\n");
+    terminal_writestring("MyOS v0.7 - Operating System with ELF Loader\n");
     terminal_writestring("==============================================\n\n");
 
     // Настройка GDT для поддержки пользовательского режима
@@ -2029,7 +2029,7 @@ void kernel_main(void) {
     // Инициализация шелла
     terminal_writestring("Starting ELF-enabled shell...\n");
     enable_cursor(14, 15);
-    terminal_writestring("\n=== MyOS v2.0 ===\n");
+    terminal_writestring("\n=== MyOS v0.7 ===\n");
     terminal_writestring("Type 'help' for available commands.\n\n");
     
     shell_ready = 1;
