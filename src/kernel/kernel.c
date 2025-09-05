@@ -9,6 +9,7 @@ typedef unsigned int   size_t;
 #include "../include/types.h"
 #include "../include/elf.h"
 #include "../include/keyboard.h"
+#include "../include/ata.h"
 
 #define VGA_MEMORY 0xB8000
 #define VGA_WIDTH 80
@@ -265,8 +266,30 @@ char command_buffer[COMMAND_BUFFER_SIZE];
 int command_length = 0;
 int shell_ready = 0;
 
+// Переменные ATA дисков
+ata_device_t ata_devices[4]; // Primary Master/Slave, Secondary Master/Slave
+int ata_device_count = 0;
+
 // Переменные шелла для обработки ввода
 void shell_keyboard_callback(keyboard_event_t* event);
+
+// Объявления функций ATA драйвера
+void ata_init(void);
+bool ata_identify(ata_device_t* device);
+bool ata_read_sectors(ata_device_t* device, uint32_t lba, uint8_t sector_count, uint8_t* buffer);
+bool ata_write_sectors(ata_device_t* device, uint32_t lba, uint8_t sector_count, uint8_t* buffer);
+void ata_wait_ready(ata_device_t* device);
+void ata_wait_drq(ata_device_t* device);
+uint8_t ata_read_status(ata_device_t* device);
+void ata_select_drive(ata_device_t* device);
+ata_device_t* ata_get_primary_master(void);
+ata_device_t* ata_get_device(int index);
+void ata_list_devices(void);
+
+// Объявления команд диска
+void command_disks(void);
+void command_read_sector(const char* args);
+void command_write_sector(const char* args);
 
 // Предварительные объявления всех функций
 void terminal_writestring(const char* data);
@@ -371,6 +394,253 @@ static inline uint8_t inb(uint16_t port) {
     uint8_t ret;
     asm volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
     return ret;
+}
+
+// Функция для чтения 16-битных данных с порта
+static inline uint16_t inw(uint16_t port) {
+    uint16_t ret;
+    asm volatile ("inw %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+// Функция для записи 16-битных данных в порт
+static inline void outw(uint16_t port, uint16_t val) {
+    asm volatile ("outw %0, %1" : : "a"(val), "Nd"(port));
+}
+
+// === РЕАЛИЗАЦИЯ ATA ДРАЙВЕРА ===
+
+// Ожидание готовности диска с таймаутом
+void ata_wait_ready(ata_device_t* device) {
+    int timeout = 10000; // Таймаут 10000 итераций
+    while ((inb(device->base_port + ATA_REG_STATUS) & ATA_STATUS_BSY) && timeout > 0) {
+        timeout--;
+    }
+}
+
+// Ожидание готовности данных с таймаутом
+void ata_wait_drq(ata_device_t* device) {
+    int timeout = 10000; // Таймаут 10000 итераций
+    while (!(inb(device->base_port + ATA_REG_STATUS) & ATA_STATUS_DRQ) && timeout > 0) {
+        timeout--;
+    }
+}
+
+// Чтение статуса диска
+uint8_t ata_read_status(ata_device_t* device) {
+    return inb(device->base_port + ATA_REG_STATUS);
+}
+
+// Выбор диска
+void ata_select_drive(ata_device_t* device) {
+    outb(device->base_port + ATA_REG_DRIVE, device->drive_select);
+    // Небольшая задержка после выбора диска
+    for (int i = 0; i < 4; i++) {
+        inb(device->ctrl_port);
+    }
+}
+
+// Идентификация диска
+bool ata_identify(ata_device_t* device) {
+    ata_select_drive(device);
+    
+    // Отправляем команду IDENTIFY
+    outb(device->base_port + ATA_REG_COMMAND, ATA_CMD_IDENTIFY);
+    
+    // Проверяем статус
+    uint8_t status = ata_read_status(device);
+    if (status == 0) {
+        return false; // Диск не существует
+    }
+    
+    // Ждем готовности данных с таймаутом
+    int timeout = 10000;
+    while ((status & ATA_STATUS_BSY) && timeout > 0) {
+        status = ata_read_status(device);
+        if (status & ATA_STATUS_ERR) {
+            return false; // Ошибка
+        }
+        timeout--;
+    }
+    if (timeout == 0) return false; // Таймаут
+    
+    // Ждем DRQ с таймаутом
+    timeout = 10000;
+    while (!(status & ATA_STATUS_DRQ) && timeout > 0) {
+        status = ata_read_status(device);
+        if (status & ATA_STATUS_ERR) {
+            return false;
+        }
+        timeout--;
+    }
+    if (timeout == 0) return false; // Таймаут
+    
+    // Читаем данные идентификации
+    uint16_t identify_data[256];
+    for (int i = 0; i < 256; i++) {
+        identify_data[i] = inw(device->base_port + ATA_REG_DATA);
+    }
+    
+    // Извлекаем информацию о диске
+    device->sectors = *((uint32_t*)&identify_data[60]); // LBA sectors
+    device->cylinders = identify_data[1];
+    device->heads = identify_data[3];
+    device->sectors_per_track = identify_data[6];
+    
+    // Извлекаем модель диска (слова 27-46)
+    for (int i = 0; i < 20; i++) {
+        uint16_t word = identify_data[27 + i];
+        device->model[i * 2] = (word >> 8) & 0xFF;
+        device->model[i * 2 + 1] = word & 0xFF;
+    }
+    device->model[40] = '\0';
+    
+    // Проверяем поддержку LBA
+    device->lba_supported = (identify_data[49] & 0x200) != 0;
+    device->present = true;
+    
+    return true;
+}
+
+// Чтение секторов с диска
+bool ata_read_sectors(ata_device_t* device, uint32_t lba, uint8_t sector_count, uint8_t* buffer) {
+    if (!device->present || !device->lba_supported) {
+        return false;
+    }
+    
+    ata_select_drive(device);
+    ata_wait_ready(device);
+    
+    // Настраиваем LBA адресацию
+    outb(device->base_port + ATA_REG_SECCOUNT, sector_count);
+    outb(device->base_port + ATA_REG_LBA_LOW, lba & 0xFF);
+    outb(device->base_port + ATA_REG_LBA_MID, (lba >> 8) & 0xFF);
+    outb(device->base_port + ATA_REG_LBA_HIGH, (lba >> 16) & 0xFF);
+    
+    // Устанавливаем старшие биты LBA в регистр Drive
+    uint8_t drive_head = device->drive_select | ATA_DRIVE_LBA | ((lba >> 24) & 0x0F);
+    outb(device->base_port + ATA_REG_DRIVE, drive_head);
+    
+    // Отправляем команду чтения
+    outb(device->base_port + ATA_REG_COMMAND, ATA_CMD_READ_SECTORS);
+    
+    // Читаем каждый сектор
+    for (int sec = 0; sec < sector_count; sec++) {
+        ata_wait_drq(device);
+        
+        // Проверяем на ошибки
+        uint8_t status = ata_read_status(device);
+        if (status & ATA_STATUS_ERR) {
+            return false;
+        }
+        
+        // Читаем 256 слов (512 байт)
+        uint16_t* word_buffer = (uint16_t*)(buffer + sec * ATA_SECTOR_SIZE);
+        for (int i = 0; i < 256; i++) {
+            word_buffer[i] = inw(device->base_port + ATA_REG_DATA);
+        }
+    }
+    
+    return true;
+}
+
+// Запись секторов на диск
+bool ata_write_sectors(ata_device_t* device, uint32_t lba, uint8_t sector_count, uint8_t* buffer) {
+    if (!device->present || !device->lba_supported) {
+        return false;
+    }
+    
+    ata_select_drive(device);
+    ata_wait_ready(device);
+    
+    // Настраиваем LBA адресацию
+    outb(device->base_port + ATA_REG_SECCOUNT, sector_count);
+    outb(device->base_port + ATA_REG_LBA_LOW, lba & 0xFF);
+    outb(device->base_port + ATA_REG_LBA_MID, (lba >> 8) & 0xFF);
+    outb(device->base_port + ATA_REG_LBA_HIGH, (lba >> 16) & 0xFF);
+    
+    // Устанавливаем старшие биты LBA в регистр Drive
+    uint8_t drive_head = device->drive_select | ATA_DRIVE_LBA | ((lba >> 24) & 0x0F);
+    outb(device->base_port + ATA_REG_DRIVE, drive_head);
+    
+    // Отправляем команду записи
+    outb(device->base_port + ATA_REG_COMMAND, ATA_CMD_WRITE_SECTORS);
+    
+    // Записываем каждый сектор
+    for (int sec = 0; sec < sector_count; sec++) {
+        ata_wait_drq(device);
+        
+        // Проверяем на ошибки
+        uint8_t status = ata_read_status(device);
+        if (status & ATA_STATUS_ERR) {
+            return false;
+        }
+        
+        // Записываем 256 слов (512 байт)
+        uint16_t* word_buffer = (uint16_t*)(buffer + sec * ATA_SECTOR_SIZE);
+        for (int i = 0; i < 256; i++) {
+            outw(device->base_port + ATA_REG_DATA, word_buffer[i]);
+        }
+    }
+    
+    // Отправляем команду flush для гарантии записи
+    outb(device->base_port + ATA_REG_COMMAND, ATA_CMD_FLUSH);
+    ata_wait_ready(device);
+    
+    return true;
+}
+
+// Инициализация ATA драйвера
+void ata_init(void) {
+    ata_device_count = 0;
+    
+    // Инициализируем информацию о дисках
+    ata_devices[0] = (ata_device_t){ATA_PRIMARY_BASE, ATA_PRIMARY_CTRL, 0, ATA_DRIVE_MASTER, 0, 0, 0, 0, "", false, false};
+    ata_devices[1] = (ata_device_t){ATA_PRIMARY_BASE, ATA_PRIMARY_CTRL, 1, ATA_DRIVE_SLAVE, 0, 0, 0, 0, "", false, false};
+    ata_devices[2] = (ata_device_t){ATA_SECONDARY_BASE, ATA_SECONDARY_CTRL, 0, ATA_DRIVE_MASTER, 0, 0, 0, 0, "", false, false};
+    ata_devices[3] = (ata_device_t){ATA_SECONDARY_BASE, ATA_SECONDARY_CTRL, 1, ATA_DRIVE_SLAVE, 0, 0, 0, 0, "", false, false};
+    
+    // Пытаемся идентифицировать каждый диск
+    for (int i = 0; i < 4; i++) {
+        if (ata_identify(&ata_devices[i])) {
+            ata_device_count++;
+        }
+    }
+}
+
+// Получение Primary Master диска
+ata_device_t* ata_get_primary_master(void) {
+    if (ata_devices[0].present) {
+        return &ata_devices[0];
+    }
+    return NULL;
+}
+
+// Получение диска по индексу
+ata_device_t* ata_get_device(int index) {
+    if (index >= 0 && index < 4 && ata_devices[index].present) {
+        return &ata_devices[index];
+    }
+    return NULL;
+}
+
+// Список всех дисков
+void ata_list_devices(void) {
+    terminal_writestring("ATA/IDE Devices:\n");
+    for (int i = 0; i < 4; i++) {
+        if (ata_devices[i].present) {
+            terminal_writestring("  Device ");
+            print_number(i);
+            terminal_writestring(": ");
+            terminal_writestring(ata_devices[i].model);
+            terminal_writestring(" (");
+            print_number(ata_devices[i].sectors);
+            terminal_writestring(" sectors)\n");
+        }
+    }
+    if (ata_device_count == 0) {
+        terminal_writestring("  No ATA devices found\n");
+    }
 }
 
 // Функции для работы с памятью
@@ -1458,6 +1728,9 @@ void command_help(void) {
     terminal_writestring("  run <f>    - Run ELF program from file\n");
     terminal_writestring("  reboot     - Restart system\n");
     terminal_writestring("  poweroff   - Shutdown system\n");
+    terminal_writestring("  disks      - List ATA/IDE disks\n");
+    terminal_writestring("  readsector <lba> - Read disk sector\n");
+    terminal_writestring("  writesector <lba> <data> - Write to disk sector\n");
     terminal_writestring("\nELF Loader Commands:\n");
     terminal_writestring("  testelf    - Test built-in ELF program\n");
     terminal_writestring("  run <file> - Load and execute ELF file\n");
@@ -1843,6 +2116,79 @@ void command_poweroff(void) {
     while(1) asm volatile("hlt");
 }
 
+// === КОМАНДЫ РАБОТЫ С ДИСКАМИ ===
+
+void command_disks(void) {
+    ata_list_devices();
+}
+
+void command_read_sector(const char* args) {
+    if (strlen(args) == 0) {
+        terminal_writestring("Usage: readsector <lba>\n");
+        return;
+    }
+    
+    // Простой парсинг числа LBA
+    uint32_t lba = 0;
+    for (int i = 0; args[i] && args[i] >= '0' && args[i] <= '9'; i++) {
+        lba = lba * 10 + (args[i] - '0');
+    }
+    
+    ata_device_t* disk = ata_get_primary_master();
+    if (!disk) {
+        terminal_writestring("No primary master disk found\n");
+        return;
+    }
+    
+    uint8_t buffer[ATA_SECTOR_SIZE];
+    if (ata_read_sectors(disk, lba, 1, buffer)) {
+        terminal_writestring("Sector ");
+        print_number(lba);
+        terminal_writestring(" (first 256 bytes):\n");
+        
+        // Показываем первые 256 байт в hex формате
+        for (int i = 0; i < 256; i++) {
+            if (i % 16 == 0) {
+                // Новая строка каждые 16 байт
+                if (i > 0) terminal_writestring("\n");
+                // Выводим адрес
+                uint32_t addr = i;
+                char hex[8];
+                for (int j = 6; j >= 0; j -= 2) {
+                    uint8_t nibble = (addr >> (j * 4)) & 0xF;
+                    hex[6-j] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+                    hex[7-j] = (nibble < 10) ? ('0' + nibble) : ('A' + nibble - 10);
+                }
+                hex[6] = ':';
+                hex[7] = ' ';
+                for (int k = 0; k < 8; k++) {
+                    terminal_putchar(hex[k]);
+                }
+            }
+            
+            // Выводим байт в hex
+            uint8_t byte = buffer[i];
+            uint8_t high = (byte >> 4) & 0xF;
+            uint8_t low = byte & 0xF;
+            terminal_putchar((high < 10) ? ('0' + high) : ('A' + high - 10));
+            terminal_putchar((low < 10) ? ('0' + low) : ('A' + low - 10));
+            terminal_putchar(' ');
+        }
+        terminal_writestring("\n");
+    } else {
+        terminal_writestring("Failed to read sector ");
+        print_number(lba);
+        terminal_writestring("\n");
+    }
+}
+
+void command_write_sector(const char* args) {
+    (void)args; // Подавляем предупреждение о неиспользуемом параметре
+    terminal_writestring("Usage: writesector <lba> <data>\n");
+    terminal_writestring("Note: This command is disabled for safety.\n");
+    terminal_writestring("Use 'format' command to initialize disk filesystem.\n");
+}
+
 void execute_command(const char* command) {
     if (strcmp(command, "") == 0) {
         // Пустая команда
@@ -1907,6 +2253,12 @@ void execute_command(const char* command) {
         command_reboot();
     } else if (strcmp(cmd, "poweroff") == 0) {
         command_poweroff();
+    } else if (strcmp(cmd, "disks") == 0) {
+        command_disks();
+    } else if (strcmp(cmd, "readsector") == 0) {
+        command_read_sector(args);
+    } else if (strcmp(cmd, "writesector") == 0) {
+        command_write_sector(args);
     } else {
         terminal_writestring("Unknown command: ");
         terminal_writestring(command);
@@ -1986,6 +2338,13 @@ void kernel_main(void) {
     // Инициализация файловой системы
     init_filesystem();
     terminal_writestring("File system ready\n");
+    
+    // Инициализация ATA дисков (с исправленными таймаутами)
+    terminal_writestring("Initializing ATA/IDE disks...\n");
+    ata_init();
+    terminal_writestring("Found ");
+    print_number(ata_device_count);
+    terminal_writestring(" ATA devices\n");
     
     // Инициализация планировщика задач
     init_scheduler();
