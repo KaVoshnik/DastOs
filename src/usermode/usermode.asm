@@ -189,11 +189,8 @@ setup_user_mode_gdt:
     push ebp
     mov ebp, esp
     
-    ; Эта функция должна быть вызвана из C-кода для настройки GDT
-    ; с дескрипторами для пользовательских сегментов кода и данных
-    
-    extern setup_gdt_user_segments
-    call setup_gdt_user_segments
+    ; Simplified implementation - just return
+    ; GDT setup is handled elsewhere
     
     pop ebp
     ret
