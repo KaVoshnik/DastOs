@@ -144,6 +144,10 @@ static inline int is_cpl3(void)
     return (cpl & 3) == 3;
 }
 
+// Forward declarations to access scheduler globals early
+struct task;
+extern struct task *current_task;
+
 // ===== БЕЗОПАСНОЕ ПОСТРАНИЧНОЕ КОПИРОВАНИЕ USER/KERNEL =====
 
 // Проверка валидности пользовательской страницы
