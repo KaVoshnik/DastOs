@@ -176,6 +176,15 @@ typedef struct {
     uint32_t load_base;           // Base address where ELF is loaded
     uint32_t entry_point;         // Entry point address
     int valid;                    // Whether ELF file is valid
+    // Demand-paging metadata
+    struct {
+        uint32_t vaddr;           // Original VADDR from PT_LOAD
+        uint32_t offset;          // File offset of segment
+        uint32_t filesz;          // File size of segment
+        uint32_t memsz;           // Memory size of segment
+        uint32_t flags;           // PF flags
+    } segments[16];
+    uint32_t num_segments;        // Number of PT_LOAD segments captured
 } elf_loader_t;
 
 // Function declarations

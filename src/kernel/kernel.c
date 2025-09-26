@@ -43,6 +43,9 @@ typedef unsigned int size_t;
 #define PAGE_PS 0x080       // Page Size (только для PDE)
 #define PAGE_GLOBAL 0x100   // Глобальная страница
 
+// Раздел адресного пространства: 0..0xBFFFFFFF — ядро, 0xC0000000.. — пользователь
+#define USER_SPACE_BASE 0xC0000000
+
 // Адреса для размещения структур пейджинга
 #define PAGE_DIRECTORY_ADDR 0x300000 // 3MB - Page Directory
 #define PAGE_TABLES_ADDR 0x301000    // 3MB+4KB - Page Tables
@@ -125,6 +128,21 @@ typedef unsigned int size_t;
 
 // ELF загрузчик
 #define ELF_LOAD_BASE 0x8000000 // Базовый адрес загрузки ELF программ (128MB)
+
+// ===== Простые макросы проверки адресов пользователя =====
+static inline int is_user_address(const void *ptr, uint32_t size)
+{
+    uint32_t start = (uint32_t)ptr;
+    uint32_t end = start + (size ? size - 1 : 0);
+    return (start >= USER_SPACE_BASE) && (end >= USER_SPACE_BASE);
+}
+
+static inline int is_cpl3(void)
+{
+    int cpl;
+    asm volatile("mov %%cs, %0" : "=r"(cpl));
+    return (cpl & 3) == 3;
+}
 
 // Флаги открытия файлов
 #define O_RDONLY 0x0000
@@ -2309,17 +2327,97 @@ void idt_set_gate(uint8_t num, uint32_t base, uint16_t sel, uint8_t flags)
     idt[num].flags = flags;
 }
 
+// ===== ЛОГГЕР И ПАНИКА =====
+static void log_reg_dump(const char *msg)
+{
+    terminal_writestring("\n[EXC] ");
+    terminal_writestring(msg);
+    terminal_writestring("\n");
+}
+
+static void kernel_panic(const char *msg)
+{
+    terminal_writestring("\nKERNEL PANIC: ");
+    terminal_writestring(msg);
+    terminal_writestring("\nSystem halted.\n");
+    asm volatile("cli");
+    while (1) asm volatile("hlt");
+}
+
 void handle_exception(void)
 {
-    // Минимальная обработка исключений - просто продолжаем
+    log_reg_dump("CPU exception occurred");
+    kernel_panic("Unhandled CPU exception");
+}
+
+// ===== ПРОСТОЙ ФИЗИЧЕСКИЙ АЛЛОКАТОР (BITMAP) =====
+#define MAX_PHYS_PAGES (HEAP_SIZE / PAGE_SIZE)
+static uint8_t phys_bitmap[MAX_PHYS_PAGES];
+
+static int phys_alloc_page(uint32_t *out_phys)
+{
+    for (uint32_t i = 0; i < MAX_PHYS_PAGES; i++) {
+        if (!phys_bitmap[i]) {
+            phys_bitmap[i] = 1;
+            *out_phys = HEAP_START + i * PAGE_SIZE;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static void phys_free_page(uint32_t phys)
+{
+    if (phys < HEAP_START) return;
+    uint32_t idx = (phys - HEAP_START) / PAGE_SIZE;
+    if (idx < MAX_PHYS_PAGES) phys_bitmap[idx] = 0;
+}
+
+// ===== DEMAND-PAGING: подкачка страниц ELF при fault =====
+static int demand_page_load(task_t *task, uint32_t fault_addr)
+{
+    if (!task || !task->elf_loader) return -1;
+    elf_loader_t *ldr = task->elf_loader;
+    for (uint32_t i = 0; i < ldr->num_segments && i < 16; i++) {
+        uint32_t seg_start = ELF_LOAD_BASE + (ldr->segments[i].vaddr - ldr->header->e_entry + (ldr->header->e_entry & 0xFFFFF000));
+        uint32_t seg_end = seg_start + ldr->segments[i].memsz;
+        if (fault_addr >= seg_start && fault_addr < seg_end) {
+            uint32_t page_base = fault_addr & 0xFFFFF000;
+            uint32_t phys;
+            if (phys_alloc_page(&phys) != 0) return -1;
+            // Инициализируем страницу из файла если попадает в filesz
+            uint32_t within = page_base - seg_start;
+            uint32_t file_off = ldr->segments[i].offset + within;
+            memset((void *)phys, 0, PAGE_SIZE);
+            if (within < ldr->segments[i].filesz) {
+                uint32_t to_copy = ldr->segments[i].filesz - within;
+                if (to_copy > PAGE_SIZE) to_copy = PAGE_SIZE;
+                memcpy((void *)phys, ldr->data + file_off, to_copy);
+            }
+            // Отобразим страницу в адресное пространство процесса
+            if (map_memory_for_process(task, page_base, phys, PAGE_SIZE, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER) < 0) {
+                phys_free_page(phys);
+                return -1;
+            }
+            flush_tlb();
+            return 0;
+        }
+    }
+    return -1;
 }
 
 void handle_page_fault(void)
 {
     uint32_t fault_addr = get_page_fault_address();
+    if (current_task && is_user_address((void *)fault_addr, 1)) {
+        if (demand_page_load(current_task, fault_addr) == 0) {
+            return; // успешно подкачали
+        }
+    }
     terminal_writestring("Page fault at address: ");
     print_hex(fault_addr);
     terminal_writestring("\n");
+    kernel_panic("Unhandled page fault");
 }
 
 // Старая функция keyboard_handler заменена на новый модуль клавиатуры
@@ -2350,126 +2448,61 @@ void timer_interrupt_handler(void)
 
 // === СИСТЕМНЫЕ ВЫЗОВЫ ===
 
+// ===== ВАЛИДАЦИЯ СИСТЕМНЫХ ВЫЗОВОВ =====
+typedef int (*syscall_fn_t)(int,int,int,int,int);
+
+static int sys_exit_impl(int code, int _1, int _2, int _3, int _4)
+{
+    (void)_1; (void)_2; (void)_3; (void)_4;
+    if (!current_task) return -1;
+    current_task->state = TASK_STATE_DEAD;
+    cleanup_process(current_task);
+    schedule();
+    return code;
+}
+
+static int sys_write_impl(int fdnum, int buf, int count, int _3, int _4)
+{
+    (void)_3; (void)_4;
+    if (count < 0) return -1;
+    if (is_cpl3()) {
+        if (!is_user_address((void *)buf, (uint32_t)count)) return -1;
+    }
+    if (fdnum == STDOUT_FILENO || fdnum == STDERR_FILENO) {
+        char *buffer = (char *)buf;
+        for (int i = 0; i < count; i++) terminal_putchar(buffer[i]);
+        return count;
+    }
+    file_descriptor_t *fd = get_fd(current_task, fdnum);
+    if (!fd || !fd->valid) return -1;
+    return fs_write_file(fd->filename, (char *)buf, (uint32_t)count) >= 0 ? count : -1;
+}
+
+static int sys_getpid_impl(int _0, int _1, int _2, int _3, int _4)
+{
+    (void)_0; (void)_1; (void)_2; (void)_3; (void)_4;
+    return current_task ? (int)current_task->process.pid : -1;
+}
+
+static const struct { int num; syscall_fn_t fn; } syscall_table[] = {
+    { SYS_EXIT,   sys_exit_impl },
+    { SYS_WRITE,  sys_write_impl },
+    { SYS_GETPID, sys_getpid_impl },
+};
+
+static syscall_fn_t find_syscall(int num)
+{
+    for (unsigned i = 0; i < (sizeof(syscall_table)/sizeof(syscall_table[0])); i++)
+        if (syscall_table[i].num == num) return syscall_table[i].fn;
+    return NULL;
+}
+
 int handle_syscall(int syscall_num, int arg0, int arg1, int arg2, int arg3, int arg4)
 {
-    (void)arg3; (void)arg4;
     if (!current_task) return -1;
-
-    switch (syscall_num)
-    {
-    case SYS_EXIT:
-        // Завершение текущей задачи
-        current_task->state = TASK_STATE_DEAD;
-        cleanup_process(current_task);
-        schedule(); // Переключаемся на другую задачу
-        return 0;
-
-    case SYS_WRITE:
-        // Вывод (arg0 = fd, arg1 = buffer, arg2 = count)
-        if (arg0 == STDOUT_FILENO || arg0 == STDERR_FILENO)
-        {
-            char *buffer = (char *)arg1;
-            for (int i = 0; i < arg2; i++)
-            {
-                terminal_putchar(buffer[i]);
-            }
-            return arg2;
-        }
-        else
-        {
-            // Запись в файл
-            file_descriptor_t *fd = get_fd(current_task, arg0);
-            if (!fd || !fd->valid) return -1;
-            
-            char *buffer = (char *)arg1;
-            int result = fs_write_file(fd->filename, buffer, arg2);
-            if (result >= 0) {
-                fd->position += arg2;
-                return arg2;
-            }
-            return -1;
-        }
-
-    case SYS_READ:
-        // Чтение (arg0 = fd, arg1 = buffer, arg2 = count)
-        if (arg0 == STDIN_FILENO)
-        {
-            // Чтение с клавиатуры (упрощенная реализация)
-            return 0; // Пока не реализовано
-        }
-        else
-        {
-            // Чтение из файла
-            file_descriptor_t *fd = get_fd(current_task, arg0);
-            if (!fd || !fd->valid) return -1;
-            
-            char *buffer = (char *)arg1;
-            int result = fs_read_file(fd->filename, buffer, arg2);
-            if (result >= 0) {
-                fd->position += result;
-                return result;
-            }
-            return -1;
-        }
-
-    case SYS_OPEN:
-        // Открытие файла (arg0 = filename, arg1 = flags)
-        return allocate_fd(current_task, (char *)arg0, arg1);
-
-    case SYS_CLOSE:
-        // Закрытие файла (arg0 = fd)
-        free_fd(current_task, arg0);
-        return 0;
-
-    case SYS_FORK:
-        // Создание нового процесса
-        task_t *child = fork_process(current_task);
-        return child ? (int)child->process.pid : -1;
-
-    case SYS_EXEC:
-        // Выполнение программы (arg0 = filename, arg1 = argv)
-        return exec_process((char *)arg0, (char **)arg1);
-
-    case SYS_WAIT:
-        // Ожидание завершения процесса (arg0 = pid)
-        return wait_process(arg0);
-
-    case SYS_GETPID:
-        return current_task->process.pid;
-
-    case SYS_GETPPID:
-        return current_task->process.ppid;
-
-    case SYS_GETUID:
-        return current_task->process.uid;
-
-    case SYS_GETGID:
-        return current_task->process.gid;
-
-    case SYS_CHDIR:
-        // Смена директории (arg0 = path)
-        strcpy(current_task->process.working_dir, (char *)arg0);
-        return 0;
-
-    case SYS_GETCWD:
-        // Получение текущей директории (arg0 = buffer, arg1 = size)
-        strcpy((char *)arg0, current_task->process.working_dir);
-        return strlen(current_task->process.working_dir);
-
-    case SYS_YIELD:
-        schedule();
-        return 0;
-
-    case SYS_SLEEP:
-        // Приостановка выполнения (arg0 = seconds)
-        current_task->state = TASK_STATE_BLOCKED;
-        // Упрощенная реализация - просто переключаем задачу
-        schedule();
-        return 0;
-
-    default:
-        return -1; // Неизвестный системный вызов
-    }
+    syscall_fn_t fn = find_syscall(syscall_num);
+    if (!fn) return -1;
+    return fn(arg0, arg1, arg2, arg3, arg4);
 }
 
 // === КОМАНДЫ ШЕЛЛА ===
