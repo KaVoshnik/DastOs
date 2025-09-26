@@ -1,3 +1,10 @@
+// Прокси-функция для раннего доступа к Page Directory текущей задачи
+uint32_t get_current_task_page_directory_proxy(void)
+{
+    if (!current_task)
+        return 0;
+    return current_task->process.page_directory;
+}
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -147,6 +154,14 @@ static inline int is_cpl3(void)
 // Forward declarations to access scheduler globals early
 struct task;
 extern struct task *current_task;
+static inline uint32_t get_current_task_page_directory_base(void);
+static inline uint32_t get_current_task_page_directory_base(void)
+{
+    // Безопасно возвращаем базу каталога страниц текущей задачи, если доступна
+    // Не обращаемся к полям struct task напрямую (тип пока не объявлен)
+    extern uint32_t get_current_task_page_directory_proxy(void);
+    return get_current_task_page_directory_proxy();
+}
 
 // ===== БЕЗОПАСНОЕ ПОСТРАНИЧНОЕ КОПИРОВАНИЕ USER/KERNEL =====
 
@@ -158,11 +173,12 @@ static int is_user_page_valid(uint32_t vaddr)
         return 0;
 
     // Получаем текущий Page Directory процесса
-    if (!current_task || !current_task->process.page_directory)
+    uint32_t page_dir_base = get_current_task_page_directory_base();
+    if (!page_dir_base)
         return 0;
 
     // Доступ к записям PDE как к массиву uint32_t (избегаем зависимости от типов)
-    uint32_t *page_dir_entries = (uint32_t *)current_task->process.page_directory;
+    uint32_t *page_dir_entries = (uint32_t *)page_dir_base;
 
     // Вычисляем индексы
     uint32_t page_dir_index = vaddr >> 22;
@@ -487,7 +503,6 @@ fs_state_t filesystem;
 uint32_t fs_time_counter = 0; // Простой счетчик времени
 
 // Переменные планировщика
-task_t *current_task = NULL;
 task_t *task_list = NULL;
 uint32_t next_task_id = 1;
 uint32_t scheduler_ticks = 0;
