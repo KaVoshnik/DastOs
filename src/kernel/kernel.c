@@ -157,26 +157,28 @@ static int is_user_page_valid(uint32_t vaddr)
     if (!current_task || !current_task->process.page_directory)
         return 0;
 
-    page_directory_t *page_dir = (page_directory_t *)current_task->process.page_directory;
+    // Доступ к записям PDE как к массиву uint32_t (избегаем зависимости от типов)
+    uint32_t *page_dir_entries = (uint32_t *)current_task->process.page_directory;
 
     // Вычисляем индексы
     uint32_t page_dir_index = vaddr >> 22;
     uint32_t page_table_index = (vaddr >> 12) & 0x3FF;
 
     // Проверяем Page Directory Entry
-    if (!(page_dir->entries[page_dir_index] & PAGE_PRESENT))
+    if (!(page_dir_entries[page_dir_index] & PAGE_PRESENT))
         return 0;
-    if (!(page_dir->entries[page_dir_index] & PAGE_USER))
+    if (!(page_dir_entries[page_dir_index] & PAGE_USER))
         return 0;
 
     // Получаем Page Table
-    uint32_t page_table_addr = page_dir->entries[page_dir_index] & 0xFFFFF000;
-    page_table_t *page_table = (page_table_t *)page_table_addr;
+    uint32_t page_table_addr = page_dir_entries[page_dir_index] & 0xFFFFF000;
+    // Доступ к записям PTE как к массиву uint32_t
+    uint32_t *page_table_entries = (uint32_t *)page_table_addr;
 
     // Проверяем Page Table Entry
-    if (!(page_table->entries[page_table_index] & PAGE_PRESENT))
+    if (!(page_table_entries[page_table_index] & PAGE_PRESENT))
         return 0;
-    if (!(page_table->entries[page_table_index] & PAGE_USER))
+    if (!(page_table_entries[page_table_index] & PAGE_USER))
         return 0;
 
     return 1;
@@ -275,13 +277,13 @@ static int copy_to_user_safe(void *user_dst, const void *kernel_src, uint32_t si
 }
 
 // Обратная совместимость - старые функции
-static int copy_from_user(void *kernel_dst, const void *user_src, uint32_t size)
+static inline int copy_from_user(void *kernel_dst, const void *user_src, uint32_t size)
 {
     int result = copy_from_user_safe(kernel_dst, user_src, size);
     return (result == (int)size) ? 0 : -1;
 }
 
-static int copy_to_user(void *user_dst, const void *kernel_src, uint32_t size)
+static inline int copy_to_user(void *user_dst, const void *kernel_src, uint32_t size)
 {
     int result = copy_to_user_safe(user_dst, kernel_src, size);
     return (result == (int)size) ? 0 : -1;
@@ -2785,7 +2787,7 @@ static int sys_write_impl(int fdnum, int buf, int count, int _3, int _4)
             copied = to_copy;
         }
 
-        for (uint32_t i = 0; i < copied; i++)
+        for (int i = 0; i < copied; i++)
             terminal_putchar(buffer[i]);
         return copied;
     }
