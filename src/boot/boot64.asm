@@ -13,6 +13,21 @@ stack_bottom:
     resb 16384               ; 16KB stack
 stack_top:
 
+; Simple 64-bit TSS (only rsp0 is used)
+align 16
+tss64:
+    resq 1                  ; reserved
+    rq 1                    ; rsp0
+    rq 1                    ; rsp1
+    rq 1                    ; rsp2
+    rq 2                    ; IST1-2
+    rq 2                    ; IST3-4
+    rq 2                    ; IST5-6
+    rq 2                    ; IST7 + reserved
+    dd 0                    ; reserved
+    dd 0                    ; IO map base (none)
+tss64_end:
+
 ; Page tables for early Long Mode (identity-map first 1GiB minimal)
 section .bss
 align 4096
@@ -94,7 +109,7 @@ _start64:
     mov cr0, eax
 
     ; Now enable 64-bit mode via long mode code segment jump
-    ; Setup temporary GDT with 64-bit code segment
+    ; Setup GDT with kernel/user segments and TSS
     lgdt [gdt_desc]
     ; Far jump to 64-bit CS
     jmp 0x08:long_mode_entry
@@ -113,6 +128,12 @@ long_mode_entry:
     ; Set 64-bit stack (reuse same memory)
     mov rsp, stack_top
 
+    ; Initialize TSS.rsp0 to kernel stack top and load TR
+    mov rax, stack_top
+    mov qword [tss64 + 8], rax   ; rsp0
+    mov ax, 0x28                 ; TSS selector
+    ltr ax
+
     ; Call C kernel
     extern kernel64_main
     call kernel64_main
@@ -127,6 +148,19 @@ gdt:
     dq 0                     ; null
     dq 0x00AF9A000000FFFF    ; 0x08: 64-bit code segment (long, DPL0)
     dq 0x00AF92000000FFFF    ; 0x10: data segment
+    dq 0x00AFFA000000FFFF    ; 0x18: 64-bit user code (DPL3)
+    dq 0x00AFF2000000FFFF    ; 0x20: user data (DPL3)
+
+; 64-bit TSS descriptor (16 bytes)
+gdt_tss:
+    dw tss64_end - tss64 - 1         ; limit 0..15
+    dw tss64                         ; base 0..15
+    db (tss64 >> 16) & 0xFF          ; base 16..23
+    db 0x89                          ; type=0x9 (available TSS), present
+    db ((tss64_end - tss64 - 1) >> 16) & 0x0F ; limit 16..19
+    db (tss64 >> 24) & 0xFF          ; base 24..31
+    dd (tss64 >> 32)                 ; base 32..63
+    dd 0                             ; reserved
 
 gdt_desc:
     dw gdt_end - gdt - 1
