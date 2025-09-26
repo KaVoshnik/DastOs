@@ -41,6 +41,7 @@ OBJECTS64 = $(BUILD_DIR)/boot64.o $(BUILD_DIR)/kernel64.o
 KERNEL_BIN = $(BUILD_DIR)/myos.bin
 KERNEL64_BIN = $(BUILD_DIR)/myos64.bin
 ISO_FILE = myos.iso
+ISO64_FILE = myos64.iso
 
 # Цель по умолчанию
 all: $(ISO_FILE)
@@ -91,11 +92,22 @@ grub-config:
 	@echo '    multiboot /boot/myos.bin' >> $(ISO_DIR)/boot/grub/grub.cfg
 	@echo '}' >> $(ISO_DIR)/boot/grub/grub.cfg
 
+grub-config64:
+	@mkdir -p $(ISO_DIR)/boot/grub
+	@echo 'menuentry "MyOS x86_64" {' > $(ISO_DIR)/boot/grub/grub.cfg
+	@echo '    multiboot /boot/myos64.bin' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo '}' >> $(ISO_DIR)/boot/grub/grub.cfg
+
 # Создание ISO образа
 $(ISO_FILE): $(KERNEL_BIN) grub-config
 	@mkdir -p $(ISO_DIR)/boot
 	cp $(KERNEL_BIN) $(ISO_DIR)/boot/myos.bin
 	grub-mkrescue -o $(ISO_FILE) $(ISO_DIR)
+
+$(ISO64_FILE): $(KERNEL64_BIN) grub-config64
+	@mkdir -p $(ISO_DIR)/boot
+	cp $(KERNEL64_BIN) $(ISO_DIR)/boot/myos64.bin
+	grub-mkrescue -o $(ISO64_FILE) $(ISO_DIR)
 
 # Сборка только ядра
 kernel: $(KERNEL_BIN)
@@ -112,6 +124,9 @@ run64: $(KERNEL64_BIN)
 # Запуск в QEMU (из ISO образа)
 run-iso: $(ISO_FILE)
 	qemu-system-i386 -cdrom $(ISO_FILE)
+
+run-iso64: $(ISO64_FILE)
+	qemu-system-x86_64 -cdrom $(ISO64_FILE)
 
 # Запуск в QEMU с VNC (для удаленного доступа)
 run-vnc: $(ISO_FILE)
