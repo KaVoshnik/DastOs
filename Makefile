@@ -36,6 +36,8 @@ SYSCALLS_OBJ = $(BUILD_DIR)/syscalls.o
 USER_MODE_OBJ = $(BUILD_DIR)/usermode.o
 OBJECTS = $(BOOT_OBJ) $(INTERRUPTS_OBJ) $(KERNEL_OBJ) $(KEYBOARD_OBJ) $(CONTEXT_OBJ) $(SYSCALLS_OBJ) $(USER_MODE_OBJ)
 OBJECTS64 = $(BUILD_DIR)/boot64.o $(BUILD_DIR)/kernel64.o
+INTERRUPTS64_ASM = $(SRC_DIR)/kernel/interrupts64.asm
+OBJECTS64 += $(BUILD_DIR)/interrupts64.o
 
 # Выходные файлы
 KERNEL_BIN = $(BUILD_DIR)/myos.bin
@@ -74,6 +76,9 @@ $(KERNEL_OBJ): $(KERNEL_C) | $(BUILD_DIR)
 
 $(BUILD_DIR)/kernel64.o: $(SRC_DIR)/kernel/kernel64.c | $(BUILD_DIR)
 	$(CC64) -m64 -nostdlib -nostdinc -fno-builtin -fno-stack-protector -nostartfiles -nodefaultlibs -Wall -Wextra -Werror -c -I$(SRC_DIR)/include $(SRC_DIR)/kernel/kernel64.c -o $(BUILD_DIR)/kernel64.o
+
+$(BUILD_DIR)/interrupts64.o: $(INTERRUPTS64_ASM) | $(BUILD_DIR)
+	$(AS) -f elf64 $(INTERRUPTS64_ASM) -o $(BUILD_DIR)/interrupts64.o
 
 $(KEYBOARD_OBJ): $(KEYBOARD_C) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(KEYBOARD_C) -o $(KEYBOARD_OBJ)
