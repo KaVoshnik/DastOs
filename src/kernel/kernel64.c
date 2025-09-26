@@ -1,5 +1,8 @@
-// Minimal 64-bit kernel main: text mode VGA init and hello
-#include <stdint.h>
+// Minimal 64-bit kernel main: text mode VGA init and hello (no libc)
+typedef unsigned char  uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int   uint32_t;
+typedef unsigned long  uint64_t;
 
 static volatile uint16_t* const VGA_MEMORY64 = (uint16_t*)0xB8000;
 static const uint8_t VGA_WIDTH64 = 80;
