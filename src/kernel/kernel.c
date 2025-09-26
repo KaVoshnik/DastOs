@@ -1,3 +1,10 @@
+// Прокси-функция для раннего доступа к Page Directory текущей задачи
+uint32_t get_current_task_page_directory_proxy(void)
+{
+    if (!current_task)
+        return 0;
+    return current_task->process.page_directory;
+}
 typedef unsigned char uint8_t;
 typedef unsigned short uint16_t;
 typedef unsigned int uint32_t;
@@ -144,28 +151,108 @@ static inline int is_cpl3(void)
     return (cpl & 3) == 3;
 }
 
-// ===== БЕЗОПАСНОЕ КОПИРОВАНИЕ USER/KERNEL =====
-static int copy_from_user(void *kernel_dst, const void *user_src, uint32_t size)
+// Forward declarations to access scheduler globals early
+struct task;
+extern struct task *current_task;
+static inline uint32_t get_current_task_page_directory_base(void);
+static inline uint32_t get_current_task_page_directory_base(void)
+{
+    // Безопасно возвращаем базу каталога страниц текущей задачи, если доступна
+    // Не обращаемся к полям struct task напрямую (тип пока не объявлен)
+    extern uint32_t get_current_task_page_directory_proxy(void);
+    return get_current_task_page_directory_proxy();
+}
+
+// ===== БЕЗОПАСНОЕ ПОСТРАНИЧНОЕ КОПИРОВАНИЕ USER/KERNEL =====
+
+// Проверка валидности пользовательской страницы
+static int is_user_page_valid(uint32_t vaddr)
+{
+    // Проверяем, что адрес в пользовательском пространстве
+    if (vaddr < USER_SPACE_BASE)
+        return 0;
+
+    // Получаем текущий Page Directory процесса
+    uint32_t page_dir_base = get_current_task_page_directory_base();
+    if (!page_dir_base)
+        return 0;
+
+    // Доступ к записям PDE как к массиву uint32_t (избегаем зависимости от типов)
+    uint32_t *page_dir_entries = (uint32_t *)page_dir_base;
+
+    // Вычисляем индексы
+    uint32_t page_dir_index = vaddr >> 22;
+    uint32_t page_table_index = (vaddr >> 12) & 0x3FF;
+
+    // Проверяем Page Directory Entry
+    if (!(page_dir_entries[page_dir_index] & PAGE_PRESENT))
+        return 0;
+    if (!(page_dir_entries[page_dir_index] & PAGE_USER))
+        return 0;
+
+    // Получаем Page Table
+    uint32_t page_table_addr = page_dir_entries[page_dir_index] & 0xFFFFF000;
+    // Доступ к записям PTE как к массиву uint32_t
+    uint32_t *page_table_entries = (uint32_t *)page_table_addr;
+
+    // Проверяем Page Table Entry
+    if (!(page_table_entries[page_table_index] & PAGE_PRESENT))
+        return 0;
+    if (!(page_table_entries[page_table_index] & PAGE_USER))
+        return 0;
+
+    return 1;
+}
+
+// Безопасное копирование из пользовательского пространства
+// Возвращает количество успешно скопированных байт
+static int copy_from_user_safe(void *kernel_dst, const void *user_src, uint32_t size)
 {
     if (!is_user_address(user_src, size))
         return -1;
     if (size == 0)
         return 0;
 
-    // Простая проверка: читаем по байту с обработкой page fault
     uint8_t *dst = (uint8_t *)kernel_dst;
     const uint8_t *src = (const uint8_t *)user_src;
+    uint32_t copied = 0;
 
-    for (uint32_t i = 0; i < size; i++)
+    // Копируем постранично
+    uint32_t current_addr = (uint32_t)user_src;
+    uint32_t remaining = size;
+
+    while (remaining > 0)
     {
-        // В реальной системе здесь был бы try/catch для page fault
-        // Пока просто копируем напрямую
-        dst[i] = src[i];
+        uint32_t page_base = current_addr & 0xFFFFF000;
+        uint32_t offset_in_page = current_addr - page_base;
+        uint32_t bytes_in_page = PAGE_SIZE - offset_in_page;
+        if (bytes_in_page > remaining)
+            bytes_in_page = remaining;
+
+        // Проверяем валидность страницы
+        if (!is_user_page_valid(page_base))
+        {
+            // Страница недоступна - возвращаем частичный успех
+            break;
+        }
+
+        // Копируем байты из этой страницы
+        for (uint32_t i = 0; i < bytes_in_page; i++)
+        {
+            dst[copied + i] = src[copied + i];
+        }
+
+        copied += bytes_in_page;
+        current_addr += bytes_in_page;
+        remaining -= bytes_in_page;
     }
-    return 0;
+
+    return copied;
 }
 
-static int copy_to_user(void *user_dst, const void *kernel_src, uint32_t size)
+// Безопасное копирование в пользовательское пространство
+// Возвращает количество успешно скопированных байт
+static int copy_to_user_safe(void *user_dst, const void *kernel_src, uint32_t size)
 {
     if (!is_user_address(user_dst, size))
         return -1;
@@ -174,12 +261,52 @@ static int copy_to_user(void *user_dst, const void *kernel_src, uint32_t size)
 
     const uint8_t *src = (const uint8_t *)kernel_src;
     uint8_t *dst = (uint8_t *)user_dst;
+    uint32_t copied = 0;
 
-    for (uint32_t i = 0; i < size; i++)
+    // Копируем постранично
+    uint32_t current_addr = (uint32_t)user_dst;
+    uint32_t remaining = size;
+
+    while (remaining > 0)
     {
-        dst[i] = src[i];
+        uint32_t page_base = current_addr & 0xFFFFF000;
+        uint32_t offset_in_page = current_addr - page_base;
+        uint32_t bytes_in_page = PAGE_SIZE - offset_in_page;
+        if (bytes_in_page > remaining)
+            bytes_in_page = remaining;
+
+        // Проверяем валидность страницы
+        if (!is_user_page_valid(page_base))
+        {
+            // Страница недоступна - возвращаем частичный успех
+            break;
+        }
+
+        // Копируем байты в эту страницу
+        for (uint32_t i = 0; i < bytes_in_page; i++)
+        {
+            dst[copied + i] = src[copied + i];
+        }
+
+        copied += bytes_in_page;
+        current_addr += bytes_in_page;
+        remaining -= bytes_in_page;
     }
-    return 0;
+
+    return copied;
+}
+
+// Обратная совместимость - старые функции
+static inline int copy_from_user(void *kernel_dst, const void *user_src, uint32_t size)
+{
+    int result = copy_from_user_safe(kernel_dst, user_src, size);
+    return (result == (int)size) ? 0 : -1;
+}
+
+static inline int copy_to_user(void *user_dst, const void *kernel_src, uint32_t size)
+{
+    int result = copy_to_user_safe(user_dst, kernel_src, size);
+    return (result == (int)size) ? 0 : -1;
 }
 
 // Флаги открытия файлов
@@ -376,7 +503,6 @@ fs_state_t filesystem;
 uint32_t fs_time_counter = 0; // Простой счетчик времени
 
 // Переменные планировщика
-task_t *current_task = NULL;
 task_t *task_list = NULL;
 uint32_t next_task_id = 1;
 uint32_t scheduler_ticks = 0;
@@ -2661,23 +2787,30 @@ static int sys_write_impl(int fdnum, int buf, int count, int _3, int _4)
         if (!is_user_address((void *)buf, (uint32_t)count))
             return -1;
     }
+
     if (fdnum == STDOUT_FILENO || fdnum == STDERR_FILENO)
     {
         char buffer[256];
         uint32_t to_copy = (count > 255) ? 255 : count;
+        int copied = 0;
+
         if (is_cpl3())
         {
-            if (copy_from_user(buffer, (void *)buf, to_copy) != 0)
+            copied = copy_from_user_safe(buffer, (void *)buf, to_copy);
+            if (copied < 0)
                 return -1;
         }
         else
         {
             memcpy(buffer, (void *)buf, to_copy);
+            copied = to_copy;
         }
-        for (uint32_t i = 0; i < to_copy; i++)
+
+        for (int i = 0; i < copied; i++)
             terminal_putchar(buffer[i]);
-        return to_copy;
+        return copied;
     }
+
     file_descriptor_t *fd = get_fd(current_task, fdnum);
     if (!fd || !fd->valid)
         return -1;
@@ -2689,9 +2822,10 @@ static int sys_write_impl(int fdnum, int buf, int count, int _3, int _4)
     int result = -1;
     if (is_cpl3())
     {
-        if (copy_from_user(kernel_buf, (void *)buf, count) == 0)
+        int copied = copy_from_user_safe(kernel_buf, (void *)buf, count);
+        if (copied > 0)
         {
-            result = fs_write_file(fd->filename, kernel_buf, count) >= 0 ? count : -1;
+            result = fs_write_file(fd->filename, kernel_buf, copied) >= 0 ? copied : -1;
         }
     }
     else
@@ -2741,8 +2875,11 @@ static int sys_read_impl(int fdnum, int buf, int count, int _3, int _4)
     {
         if (is_cpl3())
         {
-            if (copy_to_user((void *)buf, kernel_buf, result) != 0)
+            int copied = copy_to_user_safe((void *)buf, kernel_buf, result);
+            if (copied < 0)
                 result = -1;
+            else if (copied < result)
+                result = copied; // Частичный успех
         }
         else
         {
@@ -2763,16 +2900,20 @@ static int sys_open_impl(int path, int flags, int _2, int _3, int _4)
         return -1;
 
     char kernel_path[256];
+    int copied = 0;
+
     if (is_cpl3())
     {
-        if (copy_from_user(kernel_path, (void *)path, 255) != 0)
+        copied = copy_from_user_safe(kernel_path, (void *)path, 255);
+        if (copied <= 0)
             return -1;
     }
     else
     {
         strncpy(kernel_path, (char *)path, 255);
+        copied = strlen(kernel_path);
     }
-    kernel_path[255] = '\0';
+    kernel_path[copied] = '\0';
 
     return allocate_fd(current_task, kernel_path, flags);
 }
@@ -2807,16 +2948,20 @@ static int sys_exec_impl(int path, int argv, int _2, int _3, int _4)
         return -1;
 
     char kernel_path[256];
+    int copied = 0;
+
     if (is_cpl3())
     {
-        if (copy_from_user(kernel_path, (void *)path, 255) != 0)
+        copied = copy_from_user_safe(kernel_path, (void *)path, 255);
+        if (copied <= 0)
             return -1;
     }
     else
     {
         strncpy(kernel_path, (char *)path, 255);
+        copied = strlen(kernel_path);
     }
-    kernel_path[255] = '\0';
+    kernel_path[copied] = '\0';
 
     return exec_process(kernel_path, (char **)argv);
 }
@@ -3632,7 +3777,51 @@ void command_syscalls(void)
     print_number(syscall1(SYS_GETGID, 0));
     terminal_writestring("\n");
 
-    terminal_writestring("System call tests completed!\n\n");
+    // Тест безопасного копирования
+    terminal_writestring("\nTesting safe copy functions...\n");
+
+    // Создаем тестовый файл
+    if (fs_create_file("test_copy.txt") >= 0)
+    {
+        fs_write_file("test_copy.txt", "Test data for copy", 18);
+
+        // Тест open
+        int fd = syscall2(SYS_OPEN, (int)"test_copy.txt", O_RDONLY);
+        terminal_writestring("open(\"test_copy.txt\", O_RDONLY) = ");
+        print_number(fd);
+        terminal_writestring("\n");
+
+        if (fd >= 0)
+        {
+            // Тест read
+            char read_buf[32];
+            int read_result = syscall3(SYS_READ, fd, (int)read_buf, 32);
+            terminal_writestring("read(fd, buf, 32) = ");
+            print_number(read_result);
+            terminal_writestring("\n");
+
+            if (read_result > 0)
+            {
+                terminal_writestring("Read data: \"");
+                for (int i = 0; i < read_result && i < 32; i++)
+                {
+                    terminal_putchar(read_buf[i]);
+                }
+                terminal_writestring("\"\n");
+            }
+
+            // Тест close
+            int close_result = syscall1(SYS_CLOSE, fd);
+            terminal_writestring("close(fd) = ");
+            print_number(close_result);
+            terminal_writestring("\n");
+        }
+
+        // Удаляем тестовый файл
+        fs_delete_file("test_copy.txt");
+    }
+
+    terminal_writestring("\nSystem call tests completed!\n\n");
 }
 
 void execute_command(const char *command)
