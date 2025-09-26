@@ -1957,9 +1957,8 @@ void *allocate_memory_for_process(task_t *task, uint32_t size)
         return NULL;
     }
 
-    // Добавляем guard page после выделенной области
-    uint32_t guard_addr = virtual_addr + size;
-    // Guard page не отображается физически - будет вызывать page fault при доступе
+    // Добавляем guard page после выделенной области (без маппинга)
+    // Следующая страница после virtual_addr+size остается неотображенной
     // Это защищает от переполнения буфера
 
     task->process.memory_used += size + GUARD_PAGE_SIZE;
@@ -2396,7 +2395,7 @@ static void log_reg_dump(const char *msg)
 
 static void dump_registers(void)
 {
-    uint32_t eax, ebx, ecx, edx, esi, edi, esp, ebp, eip, eflags;
+    uint32_t eax, ebx, ecx, edx, esi, edi, esp, ebp;
     uint16_t cs, ds, es, fs, gs, ss;
     
     asm volatile("mov %%eax, %0" : "=m"(eax));
