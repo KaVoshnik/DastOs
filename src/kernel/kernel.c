@@ -1782,6 +1782,7 @@ void switch_to_process_page_directory(uint32_t page_dir)
 // Отображение памяти для процесса
 int map_memory_for_process(task_t *task, uint32_t virtual_addr, uint32_t physical_addr, uint32_t size, int flags)
 {
+    (void)flags;
     if (!task || !task->process.page_directory) return -1;
 
     page_directory_t *page_dir = (page_directory_t *)task->process.page_directory;
@@ -1965,6 +1966,7 @@ task_t *fork_process(task_t *parent)
 // Выполнение программы (exec)
 int exec_process(const char *filename, char **argv)
 {
+    (void)argv;
     if (!current_task || !filename) return -1;
 
     // Загружаем ELF файл
@@ -2350,6 +2352,7 @@ void timer_interrupt_handler(void)
 
 int handle_syscall(int syscall_num, int arg0, int arg1, int arg2, int arg3, int arg4)
 {
+    (void)arg3; (void)arg4;
     if (!current_task) return -1;
 
     switch (syscall_num)
@@ -2421,7 +2424,7 @@ int handle_syscall(int syscall_num, int arg0, int arg1, int arg2, int arg3, int 
     case SYS_FORK:
         // Создание нового процесса
         task_t *child = fork_process(current_task);
-        return child ? child->process.pid : -1;
+        return child ? (int)child->process.pid : -1;
 
     case SYS_EXEC:
         // Выполнение программы (arg0 = filename, arg1 = argv)
