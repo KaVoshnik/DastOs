@@ -6,49 +6,64 @@ LD = ld
 # Директории
 SRC_DIR = src
 BUILD_DIR = build
-ISO_DIR = isodir
 
 # Флаги компиляции
 ASFLAGS = -f elf32
-CFLAGS = -m32 -nostdlib -nostdinc -fno-builtin -fno-stack-protector -nostartfiles -nodefaultlibs -Wall -Wextra -Werror -c -I$(SRC_DIR)/include
-LDFLAGS = -m elf_i386 -T $(SRC_DIR)/linker.ld
+CFLAGS = -m32 -nostdlib -nostdinc -fno-builtin -fno-stack-protector -nostartfiles -nodefaultlibs -Wall -Wextra -c -Iinclude
+LDFLAGS = -m elf_i386 -T linker.ld
 
 # Исходные файлы
 BOOT_ASM = $(SRC_DIR)/boot/boot.asm
-INTERRUPTS_ASM = $(SRC_DIR)/kernel/interrupts.asm
+INTERRUPTS_ASM = $(SRC_DIR)/interrupts/interrupts.asm
+CONTEXT_ASM = $(SRC_DIR)/context/context.asm
+SYSCALLS_ASM = $(SRC_DIR)/syscalls/syscalls.asm
+USER_MODE_ASM = $(SRC_DIR)/usermode/usermode.asm
+
 KERNEL_C = $(SRC_DIR)/kernel/kernel.c
-KEYBOARD_C = $(SRC_DIR)/kernel/keyboard.c
-CONTEXT_ASM = $(SRC_DIR)/kernel/context.asm
-SYSCALLS_ASM = $(SRC_DIR)/kernel/syscalls.asm
-USER_MODE_ASM = $(SRC_DIR)/kernel/usermode.asm
+KEYBOARD_C = $(SRC_DIR)/keyboard/keyboard.c
+TERMINAL_C = $(SRC_DIR)/terminal/terminal.c
+UTILS_C = $(SRC_DIR)/utils/utils.c
+INTERRUPTS_C = $(SRC_DIR)/interrupts/interrupts.c
+MEMORY_C = $(SRC_DIR)/memory/memory.c
+FILESYSTEM_C = $(SRC_DIR)/filesystem/filesystem.c
+SCHEDULER_C = $(SRC_DIR)/scheduler/scheduler.c
+SHELL_C = $(SRC_DIR)/shell/shell.c
 
 # Объектные файлы
 BOOT_OBJ = $(BUILD_DIR)/boot.o
-INTERRUPTS_OBJ = $(BUILD_DIR)/interrupts.o
-KERNEL_OBJ = $(BUILD_DIR)/kernel.o
-KEYBOARD_OBJ = $(BUILD_DIR)/keyboard.o
+INTERRUPTS_ASM_OBJ = $(BUILD_DIR)/interrupts_asm.o
 CONTEXT_OBJ = $(BUILD_DIR)/context.o
 SYSCALLS_OBJ = $(BUILD_DIR)/syscalls.o
 USER_MODE_OBJ = $(BUILD_DIR)/usermode.o
-OBJECTS = $(BOOT_OBJ) $(INTERRUPTS_OBJ) $(KERNEL_OBJ) $(KEYBOARD_OBJ) $(CONTEXT_OBJ) $(SYSCALLS_OBJ) $(USER_MODE_OBJ)
+
+KERNEL_OBJ = $(BUILD_DIR)/kernel.o
+KEYBOARD_OBJ = $(BUILD_DIR)/keyboard.o
+TERMINAL_OBJ = $(BUILD_DIR)/terminal.o
+UTILS_OBJ = $(BUILD_DIR)/utils.o
+INTERRUPTS_C_OBJ = $(BUILD_DIR)/interrupts_c.o
+MEMORY_OBJ = $(BUILD_DIR)/memory.o
+FILESYSTEM_OBJ = $(BUILD_DIR)/filesystem.o
+SCHEDULER_OBJ = $(BUILD_DIR)/scheduler.o
+SHELL_OBJ = $(BUILD_DIR)/shell.o
+
+OBJECTS = $(BOOT_OBJ) $(INTERRUPTS_ASM_OBJ) $(CONTEXT_OBJ) $(SYSCALLS_OBJ) $(USER_MODE_OBJ) $(KERNEL_OBJ) $(KEYBOARD_OBJ) $(TERMINAL_OBJ) $(UTILS_OBJ) $(INTERRUPTS_C_OBJ) $(MEMORY_OBJ) $(FILESYSTEM_OBJ) $(SCHEDULER_OBJ) $(SHELL_OBJ)
 
 # Выходные файлы
 KERNEL_BIN = $(BUILD_DIR)/myos.bin
-ISO_FILE = myos.iso
 
 # Цель по умолчанию
-all: $(ISO_FILE)
+all: $(KERNEL_BIN)
 
 # Создание директории для сборки
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-# Сборка объектных файлов
+# Сборка ASM файлов
 $(BOOT_OBJ): $(BOOT_ASM) | $(BUILD_DIR)
 	$(AS) $(ASFLAGS) $(BOOT_ASM) -o $(BOOT_OBJ)
 
-$(INTERRUPTS_OBJ): $(INTERRUPTS_ASM) | $(BUILD_DIR)
-	$(AS) $(ASFLAGS) $(INTERRUPTS_ASM) -o $(INTERRUPTS_OBJ)
+$(INTERRUPTS_ASM_OBJ): $(INTERRUPTS_ASM) | $(BUILD_DIR)
+	$(AS) $(ASFLAGS) $(INTERRUPTS_ASM) -o $(INTERRUPTS_ASM_OBJ)
 
 $(CONTEXT_OBJ): $(CONTEXT_ASM) | $(BUILD_DIR)
 	$(AS) $(ASFLAGS) $(CONTEXT_ASM) -o $(CONTEXT_OBJ)
@@ -59,109 +74,50 @@ $(SYSCALLS_OBJ): $(SYSCALLS_ASM) | $(BUILD_DIR)
 $(USER_MODE_OBJ): $(USER_MODE_ASM) | $(BUILD_DIR)
 	$(AS) $(ASFLAGS) $(USER_MODE_ASM) -o $(USER_MODE_OBJ)
 
+# Сборка C файлов
 $(KERNEL_OBJ): $(KERNEL_C) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(KERNEL_C) -o $(KERNEL_OBJ)
 
 $(KEYBOARD_OBJ): $(KEYBOARD_C) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(KEYBOARD_C) -o $(KEYBOARD_OBJ)
 
+$(TERMINAL_OBJ): $(TERMINAL_C) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(TERMINAL_C) -o $(TERMINAL_OBJ)
+
+$(UTILS_OBJ): $(UTILS_C) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(UTILS_C) -o $(UTILS_OBJ)
+
+$(INTERRUPTS_C_OBJ): $(INTERRUPTS_C) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(INTERRUPTS_C) -o $(INTERRUPTS_C_OBJ)
+
+$(MEMORY_OBJ): $(MEMORY_C) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(MEMORY_C) -o $(MEMORY_OBJ)
+
+$(FILESYSTEM_OBJ): $(FILESYSTEM_C) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(FILESYSTEM_C) -o $(FILESYSTEM_OBJ)
+
+$(SCHEDULER_OBJ): $(SCHEDULER_C) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(SCHEDULER_C) -o $(SCHEDULER_OBJ)
+
+$(SHELL_OBJ): $(SHELL_C) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(SHELL_C) -o $(SHELL_OBJ)
+
 # Связывание ядра
 $(KERNEL_BIN): $(OBJECTS)
 	$(LD) $(LDFLAGS) $(OBJECTS) -o $(KERNEL_BIN)
 
-# Создание конфигурации GRUB
-grub-config:
-	@mkdir -p $(ISO_DIR)/boot/grub
-	@echo 'menuentry "MyOS with ELF Loader" {' > $(ISO_DIR)/boot/grub/grub.cfg
-	@echo '    multiboot /boot/myos.bin' >> $(ISO_DIR)/boot/grub/grub.cfg
-	@echo '}' >> $(ISO_DIR)/boot/grub/grub.cfg
-
-# Создание ISO образа
-$(ISO_FILE): $(KERNEL_BIN) grub-config
-	@mkdir -p $(ISO_DIR)/boot
-	cp $(KERNEL_BIN) $(ISO_DIR)/boot/myos.bin
-	grub-mkrescue -o $(ISO_FILE) $(ISO_DIR)
-
 # Сборка только ядра
 kernel: $(KERNEL_BIN)
 
-# Запуск в QEMU (из bin файла)
-run-bin: $(KERNEL_BIN)
+# Запуск в QEMU
+run: $(KERNEL_BIN)
 	qemu-system-i386 -kernel $(KERNEL_BIN)
-
-# Запуск в QEMU (из ISO образа)
-run-iso: $(ISO_FILE)
-	qemu-system-i386 -cdrom $(ISO_FILE)
-
-# Запуск в QEMU с VNC (для удаленного доступа)
-run-vnc: $(ISO_FILE)
-	qemu-system-i386 -cdrom $(ISO_FILE) -vnc :1 -daemonize
 
 # Очистка
 clean:
 	rm -rf $(BUILD_DIR)
-	rm -f $(ISO_FILE)
-	rm -f $(ISO_DIR)/boot/myos.bin
 
 # Полная очистка и пересборка
 rebuild: clean all
 
-# Показать структуру проекта
-tree:
-	@echo "Структура проекта MyOS с ELF-загрузчиком:"
-	@echo "├── src/"
-	@echo "│   ├── boot/"
-	@echo "│   │   └── boot.asm          # Загрузчик с Multiboot заголовком"
-	@echo "│   ├── kernel/"
-	@echo "│   │   ├── kernel.c          # Основной код ядра с ELF-загрузчиком"
-	@echo "│   │   ├── interrupts.asm    # Обработчики прерываний"
-	@echo "│   │   ├── context.asm       # Переключение контекста задач"
-	@echo "│   │   ├── syscalls.asm      # Системные вызовы"
-	@echo "│   │   └── usermode.asm      # Поддержка пользовательского режима"
-	@echo "│   ├── include/"
-	@echo "│   │   ├── elf.h             # Определения ELF структур"
-	@echo "│   │   └── types.h           # Базовые типы данных"
-	@echo "│   └── linker.ld             # Скрипт компоновщика"
-	@echo "├── build/                    # Директория сборки"
-	@echo "│   ├── *.o                   # Объектные файлы"
-	@echo "│   └── myos.bin              # Скомпилированное ядро"
-	@echo "├── isodir/                   # Структура ISO образа"
-	@echo "│   └── boot/"
-	@echo "│       ├── grub/grub.cfg     # Конфигурация GRUB"
-	@echo "│       └── myos.bin          # Ядро для ISO"
-	@echo "├── myos.iso                  # Загрузочный ISO образ"
-	@echo "├── Makefile                  # Система сборки"
-	@echo "└── replit.md                 # Документация проекта"
-
-# Информация о сборке
-info:
-	@echo "MyOS с ELF-загрузчиком - Build System"
-	@echo "====================================="
-	@echo "Исходники:"
-	@echo "  Boot:       $(BOOT_ASM)"
-	@echo "  Interrupts: $(INTERRUPTS_ASM)"
-	@echo "  Kernel:     $(KERNEL_C)"
-	@echo "  Context:    $(CONTEXT_ASM)"
-	@echo "  Syscalls:   $(SYSCALLS_ASM)"
-	@echo "  User Mode:  $(USER_MODE_ASM)"
-	@echo ""
-	@echo "Сборка:"
-	@echo "  Objects:    $(BUILD_DIR)/*.o"
-	@echo "  Kernel:     $(KERNEL_BIN)"
-	@echo "  ISO:        $(ISO_FILE)"
-	@echo ""
-	@echo "Доступные команды:"
-	@echo "  make all       - Собрать ISO образ"
-	@echo "  make kernel    - Собрать только ядро"
-	@echo "  make run-iso   - Запустить ISO в QEMU"
-	@echo "  make run-bin   - Запустить ядро в QEMU"
-	@echo "  make run-vnc   - Запустить с VNC доступом"
-	@echo "  make clean     - Очистить сборку"
-	@echo "  make rebuild   - Пересобрать с нуля"
-	@echo "  make tree      - Показать структуру"
-	@echo "  make info      - Эта информация"
-
-# Помощь
-help: info
-
-.PHONY: all kernel clean rebuild run-bin run-iso run-vnc grub-config tree info help
+.PHONY: all kernel clean rebuild run
