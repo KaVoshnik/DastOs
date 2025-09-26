@@ -2,6 +2,8 @@
 AS = nasm
 CC = gcc
 LD = ld
+CC64 = gcc
+LD64 = ld
 
 # Директории
 SRC_DIR = src
@@ -12,9 +14,11 @@ ISO_DIR = isodir
 ASFLAGS = -f elf32
 CFLAGS = -m32 -nostdlib -nostdinc -fno-builtin -fno-stack-protector -nostartfiles -nodefaultlibs -Wall -Wextra -Werror -c -I$(SRC_DIR)/include
 LDFLAGS = -m elf_i386 -T $(SRC_DIR)/linker.ld
+LDFLAGS64 = -T $(SRC_DIR)/linker64.ld
 
 # Исходные файлы
 BOOT_ASM = $(SRC_DIR)/boot/boot.asm
+BOOT64_ASM = $(SRC_DIR)/boot/boot64.asm
 INTERRUPTS_ASM = $(SRC_DIR)/kernel/interrupts.asm
 KERNEL_C = $(SRC_DIR)/kernel/kernel.c
 KEYBOARD_C = $(SRC_DIR)/kernel/keyboard.c
@@ -31,9 +35,11 @@ CONTEXT_OBJ = $(BUILD_DIR)/context.o
 SYSCALLS_OBJ = $(BUILD_DIR)/syscalls.o
 USER_MODE_OBJ = $(BUILD_DIR)/usermode.o
 OBJECTS = $(BOOT_OBJ) $(INTERRUPTS_OBJ) $(KERNEL_OBJ) $(KEYBOARD_OBJ) $(CONTEXT_OBJ) $(SYSCALLS_OBJ) $(USER_MODE_OBJ)
+OBJECTS64 = $(BUILD_DIR)/boot64.o $(BUILD_DIR)/kernel64.o
 
 # Выходные файлы
 KERNEL_BIN = $(BUILD_DIR)/myos.bin
+KERNEL64_BIN = $(BUILD_DIR)/myos64.bin
 ISO_FILE = myos.iso
 
 # Цель по умолчанию
@@ -46,6 +52,9 @@ $(BUILD_DIR):
 # Сборка объектных файлов
 $(BOOT_OBJ): $(BOOT_ASM) | $(BUILD_DIR)
 	$(AS) $(ASFLAGS) $(BOOT_ASM) -o $(BOOT_OBJ)
+
+$(BUILD_DIR)/boot64.o: $(BOOT64_ASM) | $(BUILD_DIR)
+	$(AS) -f elf32 $(BOOT64_ASM) -o $(BUILD_DIR)/boot64.o
 
 $(INTERRUPTS_OBJ): $(INTERRUPTS_ASM) | $(BUILD_DIR)
 	$(AS) $(ASFLAGS) $(INTERRUPTS_ASM) -o $(INTERRUPTS_OBJ)
@@ -62,12 +71,18 @@ $(USER_MODE_OBJ): $(USER_MODE_ASM) | $(BUILD_DIR)
 $(KERNEL_OBJ): $(KERNEL_C) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(KERNEL_C) -o $(KERNEL_OBJ)
 
+$(BUILD_DIR)/kernel64.o: $(SRC_DIR)/kernel/kernel64.c | $(BUILD_DIR)
+	$(CC64) -m64 -nostdlib -nostdinc -fno-builtin -fno-stack-protector -nostartfiles -nodefaultlibs -Wall -Wextra -Werror -c -I$(SRC_DIR)/include $(SRC_DIR)/kernel/kernel64.c -o $(BUILD_DIR)/kernel64.o
+
 $(KEYBOARD_OBJ): $(KEYBOARD_C) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(KEYBOARD_C) -o $(KEYBOARD_OBJ)
 
 # Связывание ядра
 $(KERNEL_BIN): $(OBJECTS)
 	$(LD) $(LDFLAGS) $(OBJECTS) -o $(KERNEL_BIN)
+
+$(KERNEL64_BIN): $(OBJECTS64)
+	$(LD64) $(LDFLAGS64) $(OBJECTS64) -o $(KERNEL64_BIN)
 
 # Создание конфигурации GRUB
 grub-config:
@@ -88,6 +103,11 @@ kernel: $(KERNEL_BIN)
 # Запуск в QEMU (из bin файла)
 run-bin: $(KERNEL_BIN)
 	qemu-system-i386 -kernel $(KERNEL_BIN)
+
+kernel64: $(KERNEL64_BIN)
+
+run64: $(KERNEL64_BIN)
+	qemu-system-x86_64 -kernel $(KERNEL64_BIN)
 
 # Запуск в QEMU (из ISO образа)
 run-iso: $(ISO_FILE)
