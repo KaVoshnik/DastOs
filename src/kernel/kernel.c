@@ -144,6 +144,38 @@ static inline int is_cpl3(void)
     return (cpl & 3) == 3;
 }
 
+// ===== БЕЗОПАСНОЕ КОПИРОВАНИЕ USER/KERNEL =====
+static int copy_from_user(void *kernel_dst, const void *user_src, uint32_t size)
+{
+    if (!is_user_address(user_src, size)) return -1;
+    if (size == 0) return 0;
+    
+    // Простая проверка: читаем по байту с обработкой page fault
+    uint8_t *dst = (uint8_t *)kernel_dst;
+    const uint8_t *src = (const uint8_t *)user_src;
+    
+    for (uint32_t i = 0; i < size; i++) {
+        // В реальной системе здесь был бы try/catch для page fault
+        // Пока просто копируем напрямую
+        dst[i] = src[i];
+    }
+    return 0;
+}
+
+static int copy_to_user(void *user_dst, const void *kernel_src, uint32_t size)
+{
+    if (!is_user_address(user_dst, size)) return -1;
+    if (size == 0) return 0;
+    
+    const uint8_t *src = (const uint8_t *)kernel_src;
+    uint8_t *dst = (uint8_t *)user_dst;
+    
+    for (uint32_t i = 0; i < size; i++) {
+        dst[i] = src[i];
+    }
+    return 0;
+}
+
 // Флаги открытия файлов
 #define O_RDONLY 0x0000
 #define O_WRONLY 0x0001
@@ -919,6 +951,25 @@ int elf_parse(elf_loader_t *loader, uint8_t *data, uint32_t size)
         loader->pheaders = (elf_program_header_t *)(data + loader->header->e_phoff);
     }
 
+    // Capture PT_LOAD segments for demand paging
+    loader->num_segments = 0;
+    loader->min_vaddr = 0xFFFFFFFF;
+    if (loader->pheaders) {
+        for (uint32_t i = 0; i < loader->header->e_phnum && loader->num_segments < 16; i++) {
+            elf_program_header_t *ph = &loader->pheaders[i];
+            if (ph->p_type == PT_LOAD) {
+                loader->segments[loader->num_segments].vaddr = ph->p_vaddr;
+                loader->segments[loader->num_segments].offset = ph->p_offset;
+                loader->segments[loader->num_segments].filesz = ph->p_filesz;
+                loader->segments[loader->num_segments].memsz = ph->p_memsz;
+                loader->segments[loader->num_segments].flags = ph->p_flags;
+                if (ph->p_vaddr < loader->min_vaddr) loader->min_vaddr = ph->p_vaddr;
+                loader->num_segments++;
+            }
+        }
+        if (loader->min_vaddr == 0xFFFFFFFF) loader->min_vaddr = 0;
+    }
+
     // Set entry point
     loader->entry_point = loader->header->e_entry;
 
@@ -963,7 +1014,7 @@ uint32_t elf_load_program(elf_loader_t *loader)
     uint32_t load_base = ELF_LOAD_BASE;
     loader->load_base = load_base;
 
-    // Second pass: actually load segments
+    // Second pass: actually load segments (eager load for now; DP also supported)
     for (int i = 0; i < loader->header->e_phnum; i++)
     {
         elf_program_header_t *ph = &loader->pheaders[i];
@@ -1874,7 +1925,10 @@ int unmap_memory_for_process(task_t *task, uint32_t virtual_addr, uint32_t size)
     return 0;
 }
 
-// Выделение памяти для процесса
+// ===== GUARD PAGES ДЛЯ СТЕКА =====
+#define GUARD_PAGE_SIZE PAGE_SIZE
+
+// Выделение памяти для процесса с guard pages
 void *allocate_memory_for_process(task_t *task, uint32_t size)
 {
     if (!task || size == 0) return NULL;
@@ -1882,8 +1936,8 @@ void *allocate_memory_for_process(task_t *task, uint32_t size)
     // Выравниваем размер по границе страницы
     size = (size + PAGE_SIZE - 1) & 0xFFFFF000;
 
-    // Проверяем лимит памяти
-    if (task->process.memory_used + size > task->process.memory_limit)
+    // Проверяем лимит памяти (учитываем guard pages)
+    if (task->process.memory_used + size + GUARD_PAGE_SIZE > task->process.memory_limit)
     {
         return NULL;
     }
@@ -1893,17 +1947,22 @@ void *allocate_memory_for_process(task_t *task, uint32_t size)
     if (!physical_mem) return NULL;
 
     // Находим свободный виртуальный адрес в пользовательском пространстве
-    uint32_t virtual_addr = 0x40000000; // Начинаем с 1GB
+    uint32_t virtual_addr = USER_SPACE_BASE + 0x1000; // Начинаем с 0xC0001000
     // В реальной системе здесь был бы более сложный алгоритм поиска свободного адреса
 
-    // Отображаем память
+    // Отображаем основную память
     if (map_memory_for_process(task, virtual_addr, (uint32_t)physical_mem, size, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER) < 0)
     {
         kfree(physical_mem);
         return NULL;
     }
 
-    task->process.memory_used += size;
+    // Добавляем guard page после выделенной области
+    uint32_t guard_addr = virtual_addr + size;
+    // Guard page не отображается физически - будет вызывать page fault при доступе
+    // Это защищает от переполнения буфера
+
+    task->process.memory_used += size + GUARD_PAGE_SIZE;
     return (void *)virtual_addr;
 }
 
@@ -2335,11 +2394,43 @@ static void log_reg_dump(const char *msg)
     terminal_writestring("\n");
 }
 
+static void dump_registers(void)
+{
+    uint32_t eax, ebx, ecx, edx, esi, edi, esp, ebp, eip, eflags;
+    uint16_t cs, ds, es, fs, gs, ss;
+    
+    asm volatile("mov %%eax, %0" : "=m"(eax));
+    asm volatile("mov %%ebx, %0" : "=m"(ebx));
+    asm volatile("mov %%ecx, %0" : "=m"(ecx));
+    asm volatile("mov %%edx, %0" : "=m"(edx));
+    asm volatile("mov %%esi, %0" : "=m"(esi));
+    asm volatile("mov %%edi, %0" : "=m"(edi));
+    asm volatile("mov %%esp, %0" : "=m"(esp));
+    asm volatile("mov %%ebp, %0" : "=m"(ebp));
+    asm volatile("mov %%cs, %0" : "=m"(cs));
+    asm volatile("mov %%ds, %0" : "=m"(ds));
+    asm volatile("mov %%es, %0" : "=m"(es));
+    asm volatile("mov %%fs, %0" : "=m"(fs));
+    asm volatile("mov %%gs, %0" : "=m"(gs));
+    asm volatile("mov %%ss, %0" : "=m"(ss));
+    
+    terminal_writestring("Registers:\n");
+    terminal_writestring("EAX="); print_hex(eax); terminal_writestring(" EBX="); print_hex(ebx);
+    terminal_writestring(" ECX="); print_hex(ecx); terminal_writestring(" EDX="); print_hex(edx);
+    terminal_writestring("\nESI="); print_hex(esi); terminal_writestring(" EDI="); print_hex(edi);
+    terminal_writestring(" ESP="); print_hex(esp); terminal_writestring(" EBP="); print_hex(ebp);
+    terminal_writestring("\nCS="); print_hex(cs); terminal_writestring(" DS="); print_hex(ds);
+    terminal_writestring(" ES="); print_hex(es); terminal_writestring(" FS="); print_hex(fs);
+    terminal_writestring(" GS="); print_hex(gs); terminal_writestring(" SS="); print_hex(ss);
+    terminal_writestring("\n");
+}
+
 static void kernel_panic(const char *msg)
 {
     terminal_writestring("\nKERNEL PANIC: ");
     terminal_writestring(msg);
     terminal_writestring("\nSystem halted.\n");
+    dump_registers();
     asm volatile("cli");
     while (1) asm volatile("hlt");
 }
@@ -2353,12 +2444,15 @@ void handle_exception(void)
 // ===== ПРОСТОЙ ФИЗИЧЕСКИЙ АЛЛОКАТОР (BITMAP) =====
 #define MAX_PHYS_PAGES (HEAP_SIZE / PAGE_SIZE)
 static uint8_t phys_bitmap[MAX_PHYS_PAGES];
+static uint32_t phys_alloc_count = 0;
+static uint32_t phys_free_count = 0;
 
 static int phys_alloc_page(uint32_t *out_phys)
 {
     for (uint32_t i = 0; i < MAX_PHYS_PAGES; i++) {
         if (!phys_bitmap[i]) {
             phys_bitmap[i] = 1;
+            phys_alloc_count++;
             *out_phys = HEAP_START + i * PAGE_SIZE;
             return 0;
         }
@@ -2370,16 +2464,22 @@ static void phys_free_page(uint32_t phys)
 {
     if (phys < HEAP_START) return;
     uint32_t idx = (phys - HEAP_START) / PAGE_SIZE;
-    if (idx < MAX_PHYS_PAGES) phys_bitmap[idx] = 0;
+    if (idx < MAX_PHYS_PAGES) {
+        phys_bitmap[idx] = 0;
+        phys_free_count++;
+    }
 }
 
 // ===== DEMAND-PAGING: подкачка страниц ELF при fault =====
+static uint32_t demand_page_count = 0;
+
 static int demand_page_load(task_t *task, uint32_t fault_addr)
 {
     if (!task || !task->elf_loader) return -1;
     elf_loader_t *ldr = task->elf_loader;
     for (uint32_t i = 0; i < ldr->num_segments && i < 16; i++) {
-        uint32_t seg_start = ELF_LOAD_BASE + (ldr->segments[i].vaddr - ldr->header->e_entry + (ldr->header->e_entry & 0xFFFFF000));
+        // Translate original vaddr to loaded vaddr using min_vaddr baseline
+        uint32_t seg_start = ldr->load_base + (ldr->segments[i].vaddr - ldr->min_vaddr);
         uint32_t seg_end = seg_start + ldr->segments[i].memsz;
         if (fault_addr >= seg_start && fault_addr < seg_end) {
             uint32_t page_base = fault_addr & 0xFFFFF000;
@@ -2400,6 +2500,7 @@ static int demand_page_load(task_t *task, uint32_t fault_addr)
                 return -1;
             }
             flush_tlb();
+            demand_page_count++;
             return 0;
         }
     }
@@ -2469,13 +2570,33 @@ static int sys_write_impl(int fdnum, int buf, int count, int _3, int _4)
         if (!is_user_address((void *)buf, (uint32_t)count)) return -1;
     }
     if (fdnum == STDOUT_FILENO || fdnum == STDERR_FILENO) {
-        char *buffer = (char *)buf;
-        for (int i = 0; i < count; i++) terminal_putchar(buffer[i]);
-        return count;
+        char buffer[256];
+        uint32_t to_copy = (count > 255) ? 255 : count;
+        if (is_cpl3()) {
+            if (copy_from_user(buffer, (void *)buf, to_copy) != 0) return -1;
+        } else {
+            memcpy(buffer, (void *)buf, to_copy);
+        }
+        for (uint32_t i = 0; i < to_copy; i++) terminal_putchar(buffer[i]);
+        return to_copy;
     }
     file_descriptor_t *fd = get_fd(current_task, fdnum);
     if (!fd || !fd->valid) return -1;
-    return fs_write_file(fd->filename, (char *)buf, (uint32_t)count) >= 0 ? count : -1;
+    
+    char *kernel_buf = (char *)kmalloc(count + 1);
+    if (!kernel_buf) return -1;
+    
+    int result = -1;
+    if (is_cpl3()) {
+        if (copy_from_user(kernel_buf, (void *)buf, count) == 0) {
+            result = fs_write_file(fd->filename, kernel_buf, count) >= 0 ? count : -1;
+        }
+    } else {
+        result = fs_write_file(fd->filename, (char *)buf, count) >= 0 ? count : -1;
+    }
+    
+    kfree(kernel_buf);
+    return result;
 }
 
 static int sys_getpid_impl(int _0, int _1, int _2, int _3, int _4)
@@ -2484,10 +2605,127 @@ static int sys_getpid_impl(int _0, int _1, int _2, int _3, int _4)
     return current_task ? (int)current_task->process.pid : -1;
 }
 
+static int sys_read_impl(int fdnum, int buf, int count, int _3, int _4)
+{
+    (void)_3; (void)_4;
+    if (count < 0) return -1;
+    if (is_cpl3() && !is_user_address((void *)buf, (uint32_t)count)) return -1;
+    
+    if (fdnum == STDIN_FILENO) {
+        // Пока не реализовано чтение с клавиатуры
+        return 0;
+    }
+    
+    file_descriptor_t *fd = get_fd(current_task, fdnum);
+    if (!fd || !fd->valid) return -1;
+    
+    char *kernel_buf = (char *)kmalloc(count + 1);
+    if (!kernel_buf) return -1;
+    
+    int result = fs_read_file(fd->filename, kernel_buf, count);
+    if (result > 0) {
+        if (is_cpl3()) {
+            if (copy_to_user((void *)buf, kernel_buf, result) != 0) result = -1;
+        } else {
+            memcpy((void *)buf, kernel_buf, result);
+        }
+    }
+    
+    kfree(kernel_buf);
+    return result;
+}
+
+static int sys_open_impl(int path, int flags, int _2, int _3, int _4)
+{
+    (void)_2; (void)_3; (void)_4;
+    if (is_cpl3() && !is_user_address((void *)path, 256)) return -1;
+    
+    char kernel_path[256];
+    if (is_cpl3()) {
+        if (copy_from_user(kernel_path, (void *)path, 255) != 0) return -1;
+    } else {
+        strncpy(kernel_path, (char *)path, 255);
+    }
+    kernel_path[255] = '\0';
+    
+    return allocate_fd(current_task, kernel_path, flags);
+}
+
+static int sys_close_impl(int fdnum, int _1, int _2, int _3, int _4)
+{
+    (void)_1; (void)_2; (void)_3; (void)_4;
+    free_fd(current_task, fdnum);
+    return 0;
+}
+
+static int sys_fork_impl(int _0, int _1, int _2, int _3, int _4)
+{
+    (void)_0; (void)_1; (void)_2; (void)_3; (void)_4;
+    task_t *child = fork_process(current_task);
+    return child ? (int)child->process.pid : -1;
+}
+
+static int sys_exec_impl(int path, int argv, int _2, int _3, int _4)
+{
+    (void)_2; (void)_3; (void)_4;
+    if (is_cpl3() && !is_user_address((void *)path, 256)) return -1;
+    
+    char kernel_path[256];
+    if (is_cpl3()) {
+        if (copy_from_user(kernel_path, (void *)path, 255) != 0) return -1;
+    } else {
+        strncpy(kernel_path, (char *)path, 255);
+    }
+    kernel_path[255] = '\0';
+    
+    return exec_process(kernel_path, (char **)argv);
+}
+
+static int sys_wait_impl(int pid, int _1, int _2, int _3, int _4)
+{
+    (void)_1; (void)_2; (void)_3; (void)_4;
+    return wait_process(pid);
+}
+
+static int sys_yield_impl(int _0, int _1, int _2, int _3, int _4)
+{
+    (void)_0; (void)_1; (void)_2; (void)_3; (void)_4;
+    schedule();
+    return 0;
+}
+
+static int sys_getppid_impl(int _0, int _1, int _2, int _3, int _4)
+{
+    (void)_0; (void)_1; (void)_2; (void)_3; (void)_4;
+    return current_task ? (int)current_task->process.ppid : -1;
+}
+
+static int sys_getuid_impl(int _0, int _1, int _2, int _3, int _4)
+{
+    (void)_0; (void)_1; (void)_2; (void)_3; (void)_4;
+    return current_task ? (int)current_task->process.uid : -1;
+}
+
+static int sys_getgid_impl(int _0, int _1, int _2, int _3, int _4)
+{
+    (void)_0; (void)_1; (void)_2; (void)_3; (void)_4;
+    return current_task ? (int)current_task->process.gid : -1;
+}
+
 static const struct { int num; syscall_fn_t fn; } syscall_table[] = {
-    { SYS_EXIT,   sys_exit_impl },
-    { SYS_WRITE,  sys_write_impl },
-    { SYS_GETPID, sys_getpid_impl },
+    { SYS_EXIT,    sys_exit_impl },
+    { SYS_WRITE,   sys_write_impl },
+    { SYS_READ,    sys_read_impl },
+    { SYS_OPEN,    sys_open_impl },
+    { SYS_CLOSE,   sys_close_impl },
+    { SYS_FORK,    sys_fork_impl },
+    { SYS_EXEC,    sys_exec_impl },
+    { SYS_WAIT,    sys_wait_impl },
+    { SYS_GETPID,  sys_getpid_impl },
+    { SYS_GETPPID, sys_getppid_impl },
+    { SYS_GETUID,  sys_getuid_impl },
+    { SYS_GETGID,  sys_getgid_impl },
+    { SYS_YIELD,   sys_yield_impl },
 };
 
 static syscall_fn_t find_syscall(int num)
@@ -2518,7 +2756,7 @@ void command_help(void)
     terminal_writestring("  help       - Show this help\n");
     terminal_writestring("  clear      - Clear screen\n");
     terminal_writestring("  about      - System information\n");
-    terminal_writestring("  memory     - Memory usage\n");
+    terminal_writestring("  memory     - Memory usage + stats\n");
     terminal_writestring("  memtest    - Test memory allocator\n");
     terminal_writestring("  keyboard   - Keyboard status\n");
     terminal_writestring("  tasks      - List tasks\n");
@@ -2537,6 +2775,7 @@ void command_help(void)
     terminal_writestring("  cd <dir>   - Change directory\n");
     terminal_writestring("  mkdir <dir> - Create directory\n");
     terminal_writestring("  rmdir <dir> - Remove directory\n");
+    terminal_writestring("  syscalls   - Test system calls\n");
     terminal_writestring("  reboot     - Restart system\n");
     terminal_writestring("  poweroff   - Shutdown system\n");
     terminal_writestring("\nELF Loader Commands:\n");
@@ -2600,7 +2839,19 @@ void command_memory(void)
     uint32_t percent = (used * 100) / total;
     terminal_writestring("  Usage: ");
     print_number(percent);
-    terminal_writestring("%\n\n");
+    terminal_writestring("%\n");
+    
+    // Статистика физических страниц
+    terminal_writestring("\nPhysical Pages:\n");
+    terminal_writestring("  Allocated: ");
+    print_number(phys_alloc_count);
+    terminal_writestring("\n");
+    terminal_writestring("  Freed: ");
+    print_number(phys_free_count);
+    terminal_writestring("\n");
+    terminal_writestring("  Demand pages loaded: ");
+    print_number(demand_page_count);
+    terminal_writestring("\n\n");
 }
 
 void command_memtest(void)
@@ -3189,6 +3440,35 @@ void command_rmdir(const char *dirname)
     }
 }
 
+void command_syscalls(void)
+{
+    terminal_writestring("Testing system calls...\n");
+    
+    // Тест getpid
+    terminal_writestring("getpid() = ");
+    print_number(syscall1(SYS_GETPID, 0));
+    terminal_writestring("\n");
+    
+    // Тест write
+    terminal_writestring("write(1, \"Hello from syscall!\", 20) = ");
+    print_number(syscall3(SYS_WRITE, 1, (int)"Hello from syscall!", 20));
+    terminal_writestring("\n");
+    
+    // Тест getppid
+    terminal_writestring("getppid() = ");
+    print_number(syscall1(SYS_GETPPID, 0));
+    terminal_writestring("\n");
+    
+    // Тест getuid/getgid
+    terminal_writestring("getuid() = ");
+    print_number(syscall1(SYS_GETUID, 0));
+    terminal_writestring(", getgid() = ");
+    print_number(syscall1(SYS_GETGID, 0));
+    terminal_writestring("\n");
+    
+    terminal_writestring("System call tests completed!\n\n");
+}
+
 void execute_command(const char *command)
 {
     if (strcmp(command, "") == 0)
@@ -3319,6 +3599,10 @@ void execute_command(const char *command)
     else if (strcmp(cmd, "rmdir") == 0)
     {
         command_rmdir(args);
+    }
+    else if (strcmp(cmd, "syscalls") == 0)
+    {
+        command_syscalls();
     }
     else
     {

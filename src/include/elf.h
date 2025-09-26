@@ -174,6 +174,7 @@ typedef struct {
     elf_section_header_t* sheaders; // Pointer to section headers
     char* string_table;           // Pointer to string table
     uint32_t load_base;           // Base address where ELF is loaded
+    uint32_t min_vaddr;           // Minimum VADDR of PT_LOAD segments
     uint32_t entry_point;         // Entry point address
     int valid;                    // Whether ELF file is valid
     // Demand-paging metadata
