@@ -27,9 +27,13 @@ static inline void putc(char c)
     }
     if (cursor_y >= VGA_HEIGHT64) {
         // scroll
-        for (uint32_t i = 0; i < (VGA_HEIGHT64 - 1) * VGA_WIDTH64; i++)
-            ((volatile uint16_t*)VGA_MEMORY64)[i] = ((volatile uint16_t*)VGA_MEMORY64)[i + VGA_WIDTH64];
-        for (uint32_t i = (VGA_HEIGHT64 - 1) * VGA_WIDTH64; i < (uint32_t)VGA_HEIGHT64 * VGA_WIDTH64; i++)
+        uint32_t row_stride = (uint32_t)VGA_WIDTH64;
+        uint32_t vis_rows = (uint32_t)VGA_HEIGHT64 - 1u;
+        uint32_t move_count = vis_rows * row_stride;
+        for (uint32_t i = 0; i < move_count; i++)
+            ((volatile uint16_t*)VGA_MEMORY64)[i] = ((volatile uint16_t*)VGA_MEMORY64)[i + row_stride];
+        uint32_t total_cells = (uint32_t)VGA_HEIGHT64 * row_stride;
+        for (uint32_t i = move_count; i < total_cells; i++)
             ((volatile uint16_t*)VGA_MEMORY64)[i] = 0x0720;
         cursor_y = VGA_HEIGHT64 - 1;
     }
@@ -43,7 +47,7 @@ static void puts(const char* s)
 void kernel64_main(void)
 {
     // clear screen
-    for (uint32_t i = 0; i < (uint32_t)VGA_WIDTH64 * VGA_HEIGHT64; i++)
+    for (uint32_t i = 0, total = (uint32_t)VGA_WIDTH64 * (uint32_t)VGA_HEIGHT64; i < total; i++)
         VGA_MEMORY64[i] = 0x0720;
     cursor_x = 0; cursor_y = 0;
 
