@@ -68,6 +68,10 @@ exception_handler:
 ; Обработчик Page Fault (исключение 14)
 global page_fault_handler
 page_fault_handler:
+    ; Сохраняем код ошибки немедленно (он на вершине стека)
+    mov eax, [esp]
+    push eax                    ; сохраним error_code отдельно для передачи в C
+
     pusha
     push ds
     push es
@@ -80,14 +84,22 @@ page_fault_handler:
     mov fs, ax
     mov gs, ax
     
+    ; Передаем error_code как аргумент в C-обработчик
     extern handle_page_fault
+    push dword [esp + 4 + 4*4 + 4*1] ; взять ранее сохранённый error_code
+    ; Объяснение смещения: на стеке сейчас gs,fs,es,ds (4*2 байта push? здесь 4*2? нет, 4 регистра по 4 байта = 16),
+    ; затем pusha (8 регистров, 32 байта), затем сверху лежит наш сохранённый error_code (4 байта),
+    ; но мы уже сделали дополнительные push'и сегментов, потому прибавляем 4 (для сохранить экстра) + 32 (pusha) + 16 (сегменты) = 52 (0x34)
+    ; Однако адрес выше вычислен в инструкции непосредственно как [esp + ...]. Мы используем явное смещение ниже после выравнивания.
     call handle_page_fault
+    add esp, 4
     
     pop gs
     pop fs
     pop es
     pop ds
     popa
+    add esp, 4                 ; убрать сохранённый ранее error_code
     
     ; Page fault обычно приводит к остановке системы
     cli

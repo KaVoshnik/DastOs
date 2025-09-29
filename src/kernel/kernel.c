@@ -1851,7 +1851,6 @@ void switch_to_process_page_directory(uint32_t page_dir)
 // Отображение памяти для процесса
 int map_memory_for_process(task_t *task, uint32_t virtual_addr, uint32_t physical_addr, uint32_t size, int flags)
 {
-    (void)flags;
     if (!task || !task->process.page_directory) return -1;
 
     page_directory_t *page_dir = (page_directory_t *)task->process.page_directory;
@@ -1878,8 +1877,11 @@ int map_memory_for_process(task_t *task, uint32_t virtual_addr, uint32_t physica
             page_table_t *page_table = (page_table_t *)page_table_addr;
             memset(page_table, 0, PAGE_TABLE_SIZE);
 
-            // Устанавливаем запись в Page Directory
-            page_dir->entries[page_dir_index] = page_table_addr | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+        // Устанавливаем запись в Page Directory (учитываем флаги WRITABLE/USER)
+        uint32_t pde_flags = PAGE_PRESENT;
+        if (flags & PAGE_WRITABLE) pde_flags |= PAGE_WRITABLE;
+        if (flags & PAGE_USER)     pde_flags |= PAGE_USER;
+        page_dir->entries[page_dir_index] = page_table_addr | pde_flags;
         }
 
         // Получаем адрес Page Table
@@ -1887,7 +1889,10 @@ int map_memory_for_process(task_t *task, uint32_t virtual_addr, uint32_t physica
         page_table_t *page_table = (page_table_t *)page_table_addr;
 
         // Устанавливаем запись в Page Table
-        page_table->entries[page_table_index] = physical_addr | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+        uint32_t pte_flags = PAGE_PRESENT;
+        if (flags & PAGE_WRITABLE) pte_flags |= PAGE_WRITABLE;
+        if (flags & PAGE_USER)     pte_flags |= PAGE_USER;
+        page_table->entries[page_table_index] = physical_addr | pte_flags;
     }
 
     return 0;
@@ -2323,8 +2328,16 @@ void switch_to_task(task_t *task)
     if (!task)
         return;
 
-    // В реальной ОС здесь было бы переключение контекста
-    // Переключение происходит без вывода сообщений
+    // Переключаем адресное пространство процесса (CR3)
+    if (task->process.page_directory)
+    {
+        switch_to_process_page_directory(task->process.page_directory);
+        flush_tlb();
+    }
+
+    // Здесь может быть реальное переключение контекста (регистров/стека)
+    // через вызов низкоуровневой функции, когда будет готово
+    // task_switch(task);
 }
 
 void task_yield(void)
@@ -2506,7 +2519,18 @@ static int demand_page_load(task_t *task, uint32_t fault_addr)
     return -1;
 }
 
-void handle_page_fault(void)
+static void decode_pf_error(uint32_t err)
+{
+    terminal_writestring("PF error: ");
+    if (err & 1) terminal_writestring("PRESENT "); else terminal_writestring("NOTPRESENT ");
+    if (err & 2) terminal_writestring("WRITE "); else terminal_writestring("READ ");
+    if (err & 4) terminal_writestring("USER "); else terminal_writestring("KERNEL ");
+    if (err & 8) terminal_writestring("RESV ");
+    if (err & 16) terminal_writestring("IFETCH ");
+    terminal_writestring("\n");
+}
+
+void handle_page_fault(uint32_t error_code)
 {
     uint32_t fault_addr = get_page_fault_address();
     if (current_task && is_user_address((void *)fault_addr, 1)) {
@@ -2517,6 +2541,7 @@ void handle_page_fault(void)
     terminal_writestring("Page fault at address: ");
     print_hex(fault_addr);
     terminal_writestring("\n");
+    decode_pf_error(error_code);
     kernel_panic("Unhandled page fault");
 }
 
