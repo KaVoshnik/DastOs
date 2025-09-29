@@ -3951,10 +3951,11 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info)
     outb(PIC2_DATA, 0x02);
     outb(PIC1_DATA, 0x01); // ICW4: Режим 8086
     outb(PIC2_DATA, 0x01);
-    outb(PIC1_DATA, 0xFC); // Маска: разрешаем IRQ0 (таймер) и IRQ1 (клавиатура)
-    outb(PIC2_DATA, 0xFF); // Маска: отключаем все прерывания PIC2
-    terminal_writestring("PIC configured for timer and keyboard\n");
-    serial_write_string("[BOOT] PIC configured\n");
+    // ВРЕМЕННО: маскируем ВСЕ IRQ для локализации перезагрузки после STI
+    outb(PIC1_DATA, 0xFF); // Маска: отключаем все IRQ на PIC1
+    outb(PIC2_DATA, 0xFF); // Маска: отключаем все IRQ на PIC2
+    terminal_writestring("PIC configured (all IRQ masked)\n");
+    serial_write_string("[BOOT] PIC configured (all masked)\n");
 
     // Инициализация таймера (100 Hz)
     init_timer(TIMER_FREQUENCY);
@@ -3974,6 +3975,9 @@ void kernel_main(uint32_t mb_magic, uint32_t mb_info)
     asm volatile("sti");
     terminal_writestring("Interrupts enabled.\n");
     serial_write_string("[BOOT] Interrupts enabled\n");
+    // Короткая задержка и метка, чтобы увидеть перезапуск
+    for (volatile int i=0;i<1000000;i++);
+    serial_write_string("[BOOT] Post-STI alive\n");
 
     // Создаем демонстрационные задачи
     terminal_writestring("Creating demo tasks...\n");
