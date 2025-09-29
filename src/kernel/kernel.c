@@ -390,6 +390,28 @@ void print_number(uint32_t num);
 void terminal_clear(void);
 void shell_prompt(void);
 void execute_command(const char *command);
+// Графический режим (объявления перед использованием)
+static void enter_graphics(void);
+static void exit_graphics(void);
+static void fb_present(void);
+
+// ===== VERY EARLY SERIAL DEBUG (COM1) =====
+#define COM1_PORT 0x3F8
+static inline void serial_out(uint16_t port, uint8_t val){ asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port)); }
+static inline uint8_t serial_in(uint16_t port){ uint8_t v; asm volatile ("inb %1, %0" : "=a"(v) : "Nd"(port)); return v; }
+static void serial_init(void)
+{
+    serial_out(COM1_PORT + 1, 0x00); // Disable all interrupts
+    serial_out(COM1_PORT + 3, 0x80); // Enable DLAB
+    serial_out(COM1_PORT + 0, 0x03); // Set divisor to 3 (38400 baud)
+    serial_out(COM1_PORT + 1, 0x00);
+    serial_out(COM1_PORT + 3, 0x03); // 8 bits, no parity, one stop bit
+    serial_out(COM1_PORT + 2, 0xC7); // Enable FIFO, clear, 14-byte threshold
+    serial_out(COM1_PORT + 4, 0x0B); // IRQs enabled, RTS/DSR set
+}
+static int serial_can_tx(void) { return serial_in(COM1_PORT + 5) & 0x20; }
+static void serial_write_char(char c){ while (!serial_can_tx()); serial_out(COM1_PORT, (uint8_t)c); }
+static void serial_write_string(const char *s){ while (*s) { if (*s=='\n') serial_write_char('\r'); serial_write_char(*s++); } }
 
 // Объявления функций файловой системы
 void init_filesystem(void);
@@ -3628,6 +3650,15 @@ void execute_command(const char *command)
     {
         command_syscalls();
     }
+    else if (strcmp(cmd, "gfxon") == 0)
+    {
+        enter_graphics();
+        fb_present();
+    }
+    else if (strcmp(cmd, "gfxoff") == 0)
+    {
+        exit_graphics();
+    }
     else
     {
         terminal_writestring("Unknown command: ");
@@ -3656,24 +3687,206 @@ void init_timer(int frequency)
     terminal_writestring(" Hz\n");
 }
 
-// Главная функция
-void kernel_main(void)
+// === FRAMEBUFFER (Multiboot1) SUPPORT ===
+
+typedef struct {
+    uint32_t addr;
+    uint32_t pitch;
+    uint32_t width;
+    uint32_t height;
+    uint8_t bpp;
+    uint8_t type; // 0=text, 1=packed pixels, 2=RGB
+    uint8_t red_mask_size, red_mask_pos;
+    uint8_t green_mask_size, green_mask_pos;
+    uint8_t blue_mask_size, blue_mask_pos;
+} fb_info_t;
+
+static fb_info_t fb;
+static int fb_available = 0;
+static uint8_t *fb_backbuffer = NULL;
+static int graphics_mode = 0;
+
+static inline void fb_putpixel(uint32_t x, uint32_t y, uint32_t color)
 {
+    if (!fb_available) return;
+    if (x >= fb.width || y >= fb.height) return;
+    uint32_t offset = y * fb.pitch + x * (fb.bpp / 8);
+    volatile uint8_t *p = (volatile uint8_t *)(graphics_mode && fb_backbuffer ? (uintptr_t)fb_backbuffer + offset : fb.addr + offset);
+    // Assume 32bpp X8R8G8B8 or similar; write little-endian color
+    p[0] = (uint8_t)(color & 0xFF);
+    p[1] = (uint8_t)((color >> 8) & 0xFF);
+    p[2] = (uint8_t)((color >> 16) & 0xFF);
+    p[3] = 0xFF;
+}
+
+static void fb_clear(uint32_t color)
+{
+    if (!fb_available) return;
+    uint32_t bytes_per_pixel = fb.bpp / 8;
+    if (graphics_mode && fb_backbuffer) {
+        for (uint32_t y = 0; y < fb.height; y++) {
+            uint8_t *row = fb_backbuffer + y * fb.pitch;
+            for (uint32_t x = 0; x < fb.width; x++) {
+                uint8_t *p = row + x * bytes_per_pixel;
+                p[0] = (uint8_t)(color & 0xFF);
+                p[1] = (uint8_t)((color >> 8) & 0xFF);
+                p[2] = (uint8_t)((color >> 16) & 0xFF);
+                if (bytes_per_pixel == 4) p[3] = 0xFF;
+            }
+        }
+    } else {
+        for (uint32_t y = 0; y < fb.height; y++) {
+            for (uint32_t x = 0; x < fb.width; x++) {
+                fb_putpixel(x, y, color);
+            }
+        }
+    }
+}
+
+static void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color)
+{
+    if (!fb_available) return;
+    if (x >= fb.width || y >= fb.height) return;
+    uint32_t x2 = x + w; if (x2 > fb.width) x2 = fb.width;
+    uint32_t y2 = y + h; if (y2 > fb.height) y2 = fb.height;
+    for (uint32_t yy = y; yy < y2; yy++)
+        for (uint32_t xx = x; xx < x2; xx++)
+            fb_putpixel(xx, yy, color);
+}
+
+// Минимальные структуры Multiboot1
+typedef struct {
+    uint32_t flags;
+    uint32_t mem_lower;
+    uint32_t mem_upper;
+    uint32_t boot_device;
+    uint32_t cmdline;
+    uint32_t mods_count;
+    uint32_t mods_addr;
+    uint32_t syms[4];
+    uint32_t mmap_length;
+    uint32_t mmap_addr;
+    uint32_t drives_length;
+    uint32_t drives_addr;
+    uint32_t config_table;
+    uint32_t boot_loader_name;
+    uint32_t apm_table;
+    uint32_t vbe_control_info;
+    uint32_t vbe_mode_info;
+    uint16_t vbe_mode;
+    uint16_t vbe_interface_seg;
+    uint16_t vbe_interface_off;
+    uint16_t vbe_interface_len;
+    uint64_t framebuffer_addr;
+    uint32_t framebuffer_pitch;
+    uint32_t framebuffer_width;
+    uint32_t framebuffer_height;
+    uint8_t  framebuffer_bpp;
+    uint8_t  framebuffer_type;
+    uint8_t  color_info[6];
+} __attribute__((packed)) multiboot_info_t;
+
+static void fb_parse_multiboot(uint32_t magic, uint32_t mbi)
+{
+    (void)magic;
+    const uint32_t MB_FLAG_FRAMEBUFFER = (1u << 12);
+    multiboot_info_t *info = (multiboot_info_t *)mbi;
+    if (!(info->flags & MB_FLAG_FRAMEBUFFER)) return;
+    fb.addr = (uint32_t)info->framebuffer_addr; // низ 32 бит
+    fb.pitch = info->framebuffer_pitch;
+    fb.width = info->framebuffer_width;
+    fb.height = info->framebuffer_height;
+    fb.bpp = info->framebuffer_bpp;
+    fb.type = info->framebuffer_type;
+    if (fb.type == 1 || (fb.type == 2 && fb.bpp == 32)) {
+        fb_available = 1;
+    }
+}
+
+static void enter_graphics(void)
+{
+    if (!fb_available) {
+        terminal_writestring("Framebuffer not available.\n");
+        return;
+    }
+    graphics_mode = 1;
+    if (!fb_backbuffer) {
+        uint32_t size = fb.pitch * fb.height;
+        fb_backbuffer = (uint8_t *)kmalloc(size);
+        if (!fb_backbuffer) {
+            terminal_writestring("Failed to allocate backbuffer.\n");
+            graphics_mode = 0;
+            return;
+        }
+    }
+    fb_clear(0x00202020);
+    fb_fill_rect(50, 50, 200, 120, 0x000080FF); // orange-ish rectangle
+}
+
+static void exit_graphics(void)
+{
+    graphics_mode = 0;
     terminal_clear();
+}
+
+static void fb_present(void)
+{
+    if (!graphics_mode || !fb_backbuffer) return;
+    uint32_t size = fb.pitch * fb.height;
+    memcpy((void *)fb.addr, fb_backbuffer, size);
+}
+
+// Главная функция
+void kernel_main(uint32_t mb_magic, uint32_t mb_info)
+{
+    // Early marker: put 'K' at text cell 10
+    volatile uint16_t *vgamem = (uint16_t *)0xB8000;
+    vgamem[10] = (uint16_t)('K') | (0x07 << 8);
+    // Early serial
+    serial_init();
+    serial_write_string("[BOOT] Enter kernel_main\n");
+    serial_write_string("[BOOT] MB magic=");
+    // print_hex uses terminal; write basic hex to serial
+    const char *hex="0123456789ABCDEF";
+    for (int i=28;i>=0;i-=4){ char c=hex[(mb_magic>>i)&0xF]; serial_write_char(c);} serial_write_string(" MBI=");
+    for (int i=28;i>=0;i-=4){ char c=hex[(mb_info>>i)&0xF]; serial_write_char(c);} serial_write_string("\n");
+    terminal_clear();
+    serial_write_string("[BOOT] Cleared VGA\n");
 
     // Включаем VGA курсор
     enable_cursor(14, 15); // Обычный курсор
 
     terminal_writestring("MyOS v0.7 - Operating System with ELF Loader\n");
+    serial_write_string("[BOOT] Printed banner\n");
     terminal_writestring("==============================================\n\n");
 
     // Настройка GDT для поддержки пользовательского режима
     terminal_writestring("Setting up GDT for user mode...\n");
     setup_gdt_user_segments();
+    serial_write_string("[BOOT] GDT user segments set\n");
     terminal_writestring("GDT configured\n");
+
+    // Сначала парсим Multiboot framebuffer
+    terminal_writestring("MB magic=");
+    print_hex(mb_magic);
+    terminal_writestring(" MBI=");
+    print_hex(mb_info);
+    terminal_putchar('\n');
+    fb_parse_multiboot(mb_magic, mb_info);
+    serial_write_string("[BOOT] Parsed multiboot FB\n");
+    terminal_writestring("FB avail=");
+    print_number(fb_available);
+    terminal_writestring("  ");
+    print_number(fb.width);
+    terminal_writestring("x");
+    print_number(fb.height);
+    terminal_writestring("x");
+    print_number(fb.bpp);
+    terminal_putchar('\n');
 
     // Сначала настраиваем IDT ДО включения прерываний
     terminal_writestring("Setting up interrupt handlers...\n");
+    serial_write_string("[BOOT] Building IDT\n");
 
     // Настройка IDT
     idtp.limit = sizeof(idt) - 1;
@@ -3703,27 +3916,33 @@ void kernel_main(void)
     // Устанавливаем обработчик клавиатуры (IRQ1 = прерывание 33)
     idt_set_gate(33, (uint32_t)irq1_handler, 0x08, 0x8E);
     idt_flush();
+    serial_write_string("[BOOT] IDT loaded\n");
 
     terminal_writestring("IDT configured with system calls and timer\n");
 
     // Инициализация управления памятью
     init_memory_management();
+    serial_write_string("[BOOT] Memory manager inited\n");
     terminal_writestring("Memory management initialized\n");
 
     // Инициализация файловой системы
     init_filesystem();
+    serial_write_string("[BOOT] FS inited\n");
     terminal_writestring("File system ready\n");
 
     // Инициализация планировщика задач
     init_scheduler();
+    serial_write_string("[BOOT] Scheduler inited\n");
     terminal_writestring("Task scheduler ready\n");
 
     // Инициализация управления процессами
     init_process_management();
+    serial_write_string("[BOOT] Process mgmt inited\n");
     terminal_writestring("Process management ready\n");
 
     // Инициализация PIC (Programmable Interrupt Controller)
     terminal_writestring("Initializing PIC...\n");
+    serial_write_string("[BOOT] PIC init\n");
     outb(PIC1_COMMAND, 0x11); // ICW1: Инициализация
     outb(PIC2_COMMAND, 0x11);
     outb(PIC1_DATA, 0x20); // ICW2: Смещение векторов прерываний (IRQ0-7 -> 32-39)
@@ -3735,20 +3954,26 @@ void kernel_main(void)
     outb(PIC1_DATA, 0xFC); // Маска: разрешаем IRQ0 (таймер) и IRQ1 (клавиатура)
     outb(PIC2_DATA, 0xFF); // Маска: отключаем все прерывания PIC2
     terminal_writestring("PIC configured for timer and keyboard\n");
+    serial_write_string("[BOOT] PIC configured\n");
 
     // Инициализация таймера (100 Hz)
     init_timer(TIMER_FREQUENCY);
+    serial_write_string("[BOOT] PIT timer inited\n");
 
     // Инициализация модуля клавиатуры
     terminal_writestring("Initializing keyboard module...\n");
     keyboard_init();
+    serial_write_string("[BOOT] Keyboard inited\n");
     keyboard_set_callback(shell_keyboard_callback);
+    serial_write_string("[BOOT] Keyboard callback set\n");
     terminal_writestring("Keyboard module ready\n");
 
     // Включаем прерывания
     terminal_writestring("Enabling interrupts...\n");
+    serial_write_string("[BOOT] STI...\n");
     asm volatile("sti");
     terminal_writestring("Interrupts enabled.\n");
+    serial_write_string("[BOOT] Interrupts enabled\n");
 
     // Создаем демонстрационные задачи
     terminal_writestring("Creating demo tasks...\n");
@@ -3756,6 +3981,7 @@ void kernel_main(void)
     create_task("demo1", demo_task1, 10);
     create_task("demo2", demo_task2, 20);
     terminal_writestring("Demo tasks created\n");
+    serial_write_string("[BOOT] Demo tasks created\n");
 
     // Инициализация шелла
     terminal_writestring("Starting ELF-enabled shell...\n");
@@ -3764,6 +3990,7 @@ void kernel_main(void)
     terminal_writestring("Type 'help' for available commands.\n\n");
 
     shell_ready = 1;
+    serial_write_string("[BOOT] Shell ready\n");
     shell_prompt();
 
     while (1)

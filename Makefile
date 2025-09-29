@@ -72,30 +72,41 @@ $(KERNEL_BIN): $(OBJECTS)
 # Создание конфигурации GRUB
 grub-config:
 	@mkdir -p $(ISO_DIR)/boot/grub
-	@echo 'menuentry "MyOS with ELF Loader" {' > $(ISO_DIR)/boot/grub/grub.cfg
+	@echo 'set timeout=0' > $(ISO_DIR)/boot/grub/grub.cfg
+	@echo 'set default=0' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo 'terminal_output console' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo 'insmod normal' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo 'insmod multiboot' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo 'menuentry "MyOS with ELF Loader" {' >> $(ISO_DIR)/boot/grub/grub.cfg
 	@echo '    multiboot /boot/myos.bin' >> $(ISO_DIR)/boot/grub/grub.cfg
+	@echo '    boot' >> $(ISO_DIR)/boot/grub/grub.cfg
 	@echo '}' >> $(ISO_DIR)/boot/grub/grub.cfg
 
 # Создание ISO образа
 $(ISO_FILE): $(KERNEL_BIN) grub-config
 	@mkdir -p $(ISO_DIR)/boot
 	cp $(KERNEL_BIN) $(ISO_DIR)/boot/myos.bin
-	grub-mkrescue -o $(ISO_FILE) $(ISO_DIR)
+	grub-mkrescue -o $(ISO_FILE) $(ISO_DIR) 2> /dev/null || \
+	  (echo "grub-mkrescue failed; trying xorriso+grub-mbr" && \
+	   xorriso -as mkisofs -R -J -b boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table \
+	           -o $(ISO_FILE) $(ISO_DIR))
 
 # Сборка только ядра
 kernel: $(KERNEL_BIN)
 
 # Запуск в QEMU (из bin файла)
 run-bin: $(KERNEL_BIN)
-	qemu-system-i386 -kernel $(KERNEL_BIN)
+	@echo "[WARN] run-bin загружает ядро напрямую и может НЕ установить графический режим. Рекомендуется make run-iso." 
+	qemu-system-i386 -m 256 -vga std -kernel $(KERNEL_BIN)
 
 # Запуск в QEMU (из ISO образа)
 run-iso: $(ISO_FILE)
-	qemu-system-i386 -cdrom $(ISO_FILE)
+	@echo "Tip: connect serial with 'telnet 127.0.0.1 5555' or 'nc -U qemu.log' if using pty"
+	qemu-system-i386 -M pc -m 256 -vga std -serial stdio -drive file=$(ISO_FILE),media=cdrom,if=ide -boot d
 
 # Запуск в QEMU с VNC (для удаленного доступа)
 run-vnc: $(ISO_FILE)
-	qemu-system-i386 -cdrom $(ISO_FILE) -vnc :1 -daemonize
+	qemu-system-i386 -m 256 -vga std -cdrom $(ISO_FILE) -vnc :1 -daemonize
 
 # Очистка
 clean:

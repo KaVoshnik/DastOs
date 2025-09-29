@@ -46,7 +46,7 @@ typedef enum {
 #define INT8_MAX    127
 #define INT16_MIN   (-32768)
 #define INT16_MAX   32767
-#define INT32_MIN   (-2147483648)
+#define INT32_MIN   (-2147483647 - 1)
 #define INT32_MAX   2147483647
 
 #endif // TYPES_H
